@@ -1,4 +1,4 @@
-<img width="338" height="56" alt="image" src="https://github.com/user-attachments/assets/0c5ba23b-6a55-4d58-8a11-73cff530bcbc" /># ChatDog
+# ChatDog
 
 > 一个极简的 **Windows 局域网聊天工具** —— 无需服务器、无需联网、无需安装，同一 WiFi / 热点下的同学即开即聊。
 
