@@ -31,18 +31,28 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def auto_allow_firewall():
-    """自动添加防火墙规则，避免用户手动放行"""
+    """自动添加防火墙规则，避免用户手动放行（需管理员权限运行，
+    打包时使用 --uac-admin 可自动获得管理员权限）"""
     try:
         # 检查是否是管理员权限
         if ctypes.windll.shell32.IsUserAnAdmin():
             rule_name = "ChatDog_UDP_Auto"
+            flags = 0x08000000  # 隐藏弹出的黑色CMD窗口
+            # 先删除旧规则，避免每次启动重复添加导致规则堆积
+            subprocess.run(
+                f'netsh advfirewall firewall delete rule name="{rule_name}"',
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags
+            )
             # 静默执行 netsh 命令放行 UDP 端口
             subprocess.run(
                 f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=UDP localport={PORT}',
                 shell=True, 
                 stdout=subprocess.DEVNULL, 
                 stderr=subprocess.DEVNULL,
-                creationflags=0x08000000  # 隐藏弹出的黑色CMD窗口
+                creationflags=flags
             )
     except Exception:
         pass
