@@ -18,6 +18,7 @@ import os
 import ctypes
 import subprocess
 import time
+import random
 
 # ============== 配置 ==============
 PORT = 50007                        # 默认模式 UDP 端口（所有客户端必须一致）
@@ -36,8 +37,6 @@ C_TEXT     = "#22262e"   # 主文字（近黑）
 C_DIM      = "#737b87"   # 次要文字（中灰）
 C_ACCENT   = "#f5a623"   # 琥珀橙主色（狗爪暖色）
 C_ACCENT_D = "#d98f12"   # 主色 hover
-C_SELF_BG  = "#fdeeca"   # 自己的气泡底（浅琥珀）
-C_SELF_TX  = "#6b4a08"   # 自己的气泡文字（深琥珀）
 C_RED      = "#e5484d"   # 警告红
 C_RED_D    = "#b91c1c"
 C_RED_BG   = "#fdecec"   # 警告底色（浅红）
@@ -45,6 +44,19 @@ FONT = "Microsoft YaHei UI"
 # 其他用户昵称配色（按 client_id 哈希分配，浅色背景下保证可读）
 NAME_COLORS = ["#3b6fd4", "#4e9a51", "#8a5cd6", "#d64562",
                "#0e8fa3", "#d97a2b", "#2e9e8f", "#b3862d"]
+# 气泡亮色调色板：每人进入时随机分配一种，配黑色文字可读
+BUBBLE_COLORS = [
+    "#fdf3c8",  # 奶油黄
+    "#ffe8d1",  # 蜜桃橙
+    "#ffd9d9",  # 樱花粉
+    "#ffe0ee",  # 淡粉紫
+    "#e8dcff",  # 薰衣草
+    "#d6e8ff",  # 天空蓝
+    "#d4f3f0",  # 薄荷青
+    "#d9f2d0",  # 嫩草绿
+    "#e5f0dc",  # 抹茶绿
+    "#f5edd9",  # 燕麦色
+]
 
 # ---------- 叠层通知参数 ----------
 TOAST_MR   = 24          # 通知距工作区右侧
@@ -774,6 +786,9 @@ class ChatDogApp(ctk.CTk):
         prof = load_profiles()
         self.nickname = (prof.get("last_nickname") or "").strip() or f"用户_{self.client_id}"
 
+        # 气泡颜色：每人进入时随机分配一种亮色，本会话内保持稳定
+        self.bubble_colors = {self.client_id: random.choice(BUBBLE_COLORS)}
+
         # 在线用户表: client_id -> {"addr": (ip, port), "name": 昵称, "last_seen": 时间戳}
         self.peers = {}
         self.peers_lock = threading.Lock()
@@ -974,17 +989,14 @@ class ChatDogApp(ctk.CTk):
         return (FONT, max(9, int(round(size * scale))), style)
 
     def setup_tags(self):
-        """消息气泡样式（基于 Text tag）。
-        注意：必须用内部 _textbox.tag_config，CTk 封装层禁止 font 参数"""
+        """消息样式（基于 Text tag）。
+        注意：必须用内部 _textbox.tag_config，CTk 封装层禁止 font 参数。
+        气泡 tag 按用户动态创建（_bubble_tag），颜色进入时随机分配。"""
         t = self.msg_text._textbox.tag_config
         t("sys", font=self._font(10, "italic"), foreground=C_DIM,
           justify="center", spacing1=8, spacing3=8)
         t("o_time", font=self._font(9), foreground=C_DIM)
-        t("o_bub", font=self._font(12), background=C_SURFACE2, foreground=C_TEXT,
-          lmargin1=18, lmargin2=18, rmargin=40, spacing1=5, spacing3=5)
         t("s_time", font=self._font(9), foreground=C_DIM, justify="right", rmargin=16)
-        t("s_bub", font=self._font(12), foreground=C_SELF_TX,
-          justify="right", lmargin1=170, lmargin2=170, rmargin=16, spacing1=5, spacing3=5)
         t("alert", font=self._font(12, "bold"), background=C_RED_BG, foreground="#c0272d",
           justify="center", spacing1=8, spacing3=8, lmargin1=18, lmargin2=18, rmargin=18)
 
@@ -995,6 +1007,27 @@ class ChatDogApp(ctk.CTk):
         try:
             self.msg_text._textbox.tag_config(
                 tag, font=self._font(12, "bold"), foreground=color)
+        except Exception:
+            pass
+        return tag
+
+    def _bubble_tag(self, cid, mine=False):
+        """为某用户创建/获取气泡 tag：随机亮色背景 + 黑色文字。
+        背景 tag 只覆盖文字本身，天然实现"气泡长度=消息长度"。
+        mine=True 时右对齐。"""
+        tag = f"bub_{cid}"
+        # 第一次见到该用户时随机分配亮色（会话内稳定，重进重新随机）
+        if cid not in self.bubble_colors:
+            self.bubble_colors[cid] = random.choice(BUBBLE_COLORS)
+        try:
+            self.msg_text._textbox.tag_config(
+                tag, font=self._font(12), background=self.bubble_colors[cid],
+                foreground="#1a1a1a",
+                justify="right" if mine else "left",
+                lmargin1=170 if mine else 18,
+                lmargin2=170 if mine else 18,
+                rmargin=16 if mine else 40,
+                spacing1=6, spacing3=6, spacing2=3)
         except Exception:
             pass
         return tag
@@ -1014,21 +1047,21 @@ class ChatDogApp(ctk.CTk):
             self._first_block = False
 
     def append_self(self, content):
-        """自己的消息：右对齐琥珀气泡"""
+        """自己的消息：右对齐随机亮色气泡"""
         ts = datetime.now().strftime("%H:%M:%S")
         self._sep()
         self._insert(f"{ts}  我", ("s_time",))
         self._insert("\n")
-        self._insert(f"  {content}  ", ("s_bub",))
+        self._insert(f"  {content}  ", (self._bubble_tag(self.client_id, mine=True),))
         self._insert("\n")
 
     def append_other(self, name, content, cid, ts):
-        """别人的消息：左对齐普通气泡，昵称带专属颜色"""
+        """别人的消息：左对齐随机亮色气泡，昵称带专属颜色"""
         self._sep()
         self._insert(f" {name} ", (self._name_tag(cid),))
         self._insert(f" {ts}", ("o_time",))
         self._insert("\n")
-        self._insert(f"  {content}  ", ("o_bub",))
+        self._insert(f"  {content}  ", (self._bubble_tag(cid),))
         self._insert("\n")
 
     def append_system(self, text):
