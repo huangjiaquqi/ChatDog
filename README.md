@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![UI](https://img.shields.io/badge/UI-Tkinter-orange)
+![UI](https://img.shields.io/badge/UI-CustomTkinter-orange)
 
 ---
 
@@ -13,11 +13,12 @@
 
 - **零配置局域网聊天**：基于 UDP 广播 + 单播双通道，连上同一个 WiFi / 手机热点就能互相发消息，不需要服务器、不需要注册。
 - **可靠的投递机制**：消息会同时通过广播和点对点单播发送，即使路由器丢弃广播，适合课堂紧急通知。
+- **现代化深色 UI**：基于 CustomTkinter 的深色主题界面，卡片式布局 + 聊天气泡 + 圆角控件，美观舒适。
 - **快捷消息**：内置 `Ctrl+2` ~ `Ctrl+0` 快捷短语（收到 / 好的 / 稍等……），支持自定义。
 - **桌面通知**：收到新消息时右下角弹出悬浮通知，5 秒自动淡出。
 - **上线/下线提醒**：用户加入或离开聊天室时自动广播系统消息。
 - **自动放行防火墙**：以管理员身份运行时自动添加 UDP 端口放行规则，无需手动配置。
-- **单文件绿色版**：提供打包好的 `chatdog.exe`，双击即用，无需安装 Python。
+- **双发行方式**：提供单文件绿色版 `chatdog.exe`（双击即用）和 `ChatDog_Setup.exe` 安装程序（中文向导、桌面快捷方式、可卸载）。
 
 ## 📸 使用场景
 
@@ -25,28 +26,39 @@
 
 ## 🚀 快速开始
 
-### 方式一：直接运行 exe（推荐）
+### 方式一：安装程序（推荐）
+
+1. 从仓库 `dist/ChatDog_Setup.exe` 下载安装程序
+2. 双击运行，按中文向导完成安装（自动创建桌面/开始菜单快捷方式）
+3. 从快捷方式启动 ChatDog，输入昵称即可加入聊天
+4. 让同一局域网内的其他同学也运行 ChatDog
+
+### 方式二：绿色版 exe
 
 1. 从 [Releases](https://github.com/huangjiaquqi/ChatDog/releases) 或仓库 `dist/chatdog.exe` 下载可执行文件
 2. 双击运行，输入昵称即可加入聊天
 3. 让同一局域网内的其他同学也运行 ChatDog
 **注意，您只需要把这个exe独立拷贝出来，无需文件夹即可随地运行**
 
-### 方式二：从源码运行
+### 方式三：从源码运行
 
 ```bash
-# 需要 Python 3.8+（自带 Tkinter）
+# 需要 Python 3.8+，并安装 customtkinter
 git clone https://github.com/huangjiaquqi/ChatDog.git
 cd ChatDog
+pip install customtkinter
 python chatdog.py
 ```
 
-### 自行打包 exe
+### 自行打包 exe 与安装程序
 
 ```bash
 pip install pyinstaller
 pyinstaller chatdog.spec
 # 产物位于 dist/chatdog.exe
+
+# 编译安装程序（需安装 Inno Setup 6）
+# 用 Inno Setup 编译 chatdog_setup.iss，产物位于 dist/ChatDog_Setup.exe
 ```
 
 ## ⌨️ 快捷键
@@ -89,10 +101,13 @@ A: 不会。消息以明文 JSON 在局域网内传输，仅适用于可信的�
 
 ```
 ChatDog/
-├── chatdog.py        # 主程序（单文件实现全部功能）
-├── chatdog.spec      # PyInstaller 打包配置
-├── icon.ico          # 应用图标
-├── dist/chatdog.exe  # 打包好的可执行文件
+├── chatdog.py                    # 主程序（单文件实现全部功能）
+├── chatdog.spec                  # PyInstaller 打包配置
+├── chatdog_setup.iss             # Inno Setup 安装程序脚本
+├── ChineseSimplified.isl         # Inno Setup 简体中文语言包
+├── icon.ico                      # 应用图标
+├── dist/chatdog.exe              # 打包好的可执行文件（绿色版）
+├── dist/ChatDog_Setup.exe        # 打包好的安装程序
 └── README.md
 ```
 
