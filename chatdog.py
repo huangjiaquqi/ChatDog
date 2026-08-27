@@ -151,7 +151,18 @@ def get_local_ips():
                 ips.append(ip)
     except Exception:
         pass
-    return ips or ["127.0.0.1"]
+    return sorted(ips) or ["127.0.0.1"]
+
+
+# 本机 IP 列表缓存：只在进程启动时取一次，保证列表顺序稳定不跳动
+_LOCAL_IPS = None
+
+
+def local_ips():
+    global _LOCAL_IPS
+    if _LOCAL_IPS is None:
+        _LOCAL_IPS = get_local_ips()
+    return _LOCAL_IPS
 
 
 def auto_allow_firewall(protocol, port):
@@ -558,11 +569,12 @@ class LaunchWindow(ctk.CTk):
         ipbox.pack(fill="x")
         ctk.CTkLabel(ipbox, text="本机 IP（告诉要连你的人，点击复制）：",
                      font=(FONT, 11), text_color=C_DIM).pack(anchor="w")
-        for ip in get_local_ips():
+        for ip in local_ips():
             btn = ctk.CTkButton(ipbox, text=f"  {ip}  📋  ", width=170, height=30,
                                 corner_radius=8, fg_color=C_SURFACE2, hover_color=C_BORDER,
                                 text_color=C_TEXT, font=(FONT, 11, "bold"),
-                                anchor="w", command=lambda i=ip: self._copy_ip(i, btn))
+                                anchor="w")
+            btn.configure(command=lambda i=ip, b=btn: self._copy_ip(i, b))
             btn.pack(anchor="w", pady=3)
             self._copy_btns.append(btn)
 
@@ -1208,7 +1220,7 @@ class ChatDogApp(ctk.CTk):
             return
         threading.Thread(target=self.server_accept_loop, daemon=True).start()
         self.append_system(f"服务器模式 · 正在监听端口 {self.port}，等待其他人连接")
-        ips = ", ".join(get_local_ips())
+        ips = ", ".join(local_ips())
         self.append_system(f"把你的 IP 和端口告诉其他人即可互连 → {ips} :{self.port}")
 
     def server_accept_loop(self):
