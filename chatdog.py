@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""ChatDog - 局域网聊天工具（现代化深色 UI 版）"""
+"""ChatDog - 局域网/直连聊天工具（深色 UI · 三模式版）
+
+启动模式:
+  lan     默认模式，同一 WiFi/热点下 UDP 广播+单播自动发现
+  server  服务器模式，TCP 监听端口，其他人直连你的 IP:端口
+  client  客户端模式，TCP 直连对方的 IP:端口
+支持完全无网环境（网线直连等），历史配置记忆在程序目录 chatdog_profiles.json
+"""
 import socket
 import threading
 import json
@@ -13,32 +20,41 @@ import subprocess
 import time
 
 # ============== 配置 ==============
-PORT = 50007                 # UDP通信端口（所有客户端必须一致）
+PORT = 50007                        # 默认模式 UDP 端口（所有客户端必须一致）
 BROADCAST_ADDR = '255.255.255.255'  # 受限广播地址（兜底）
-PEER_TIMEOUT = 15            # 在线用户超时时间（秒），超过则视为离线
-ANNOUNCE_INTERVAL = 3        # 上线广播/心跳间隔（秒）
+PEER_TIMEOUT = 15                   # 在线用户超时时间（秒）
+ANNOUNCE_INTERVAL = 3               # 上线广播/心跳间隔（秒）
+DEFAULT_TCP_PORT = 50008            # 服务器/客户端模式默认 TCP 端口
 # =================================
 
-# ---------- 设计令牌 ----------
-C_BG       = "#141519"   # 全局背景
-C_SURFACE  = "#1c1e24"   # 卡片/控件底
-C_SURFACE2 = "#232630"   # 输入框/气泡底
-C_BORDER   = "#2b2f39"   # 描边
-C_TEXT     = "#e9ecf1"   # 主文字
-C_DIM      = "#8b919d"   # 次要文字
-C_ACCENT   = "#f6a821"   # 琥珀橙主色（狗爪暖色）
+# ---------- 设计令牌（浅色风格） ----------
+C_BG       = "#f4f5f7"   # 全局背景（浅灰白）
+C_SURFACE  = "#ffffff"   # 卡片/控件底（纯白）
+C_SURFACE2 = "#eceef2"   # 输入框/气泡底（浅灰）
+C_BORDER   = "#d9dde5"   # 描边
+C_TEXT     = "#22262e"   # 主文字（近黑）
+C_DIM      = "#737b87"   # 次要文字（中灰）
+C_ACCENT   = "#f5a623"   # 琥珀橙主色（狗爪暖色）
 C_ACCENT_D = "#d98f12"   # 主色 hover
-C_SELF_BG  = "#43351a"   # 自己的气泡底（琥珀深色）
-C_SELF_TX  = "#ffedb8"   # 自己的气泡文字
-C_RED      = "#ef4444"   # 警告红
+C_SELF_BG  = "#fdeeca"   # 自己的气泡底（浅琥珀）
+C_SELF_TX  = "#6b4a08"   # 自己的气泡文字（深琥珀）
+C_RED      = "#e5484d"   # 警告红
 C_RED_D    = "#b91c1c"
-C_RED_BG   = "#331414"   # 警告底色
+C_RED_BG   = "#fdecec"   # 警告底色（浅红）
 FONT = "Microsoft YaHei UI"
-# 其他用户昵称配色（按 client_id 哈希分配，便于区分发言人）
-NAME_COLORS = ["#7aa2f7", "#9ece6a", "#bb9af7", "#f7768e",
-               "#7dcfff", "#ff9e64", "#73daca", "#e0af68"]
+# 其他用户昵称配色（按 client_id 哈希分配，浅色背景下保证可读）
+NAME_COLORS = ["#3b6fd4", "#4e9a51", "#8a5cd6", "#d64562",
+               "#0e8fa3", "#d97a2b", "#2e9e8f", "#b3862d"]
 
-ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ChatDog.App.1.0")
+# ---------- 叠层通知参数 ----------
+TRANS_KEY  = "#010203"   # Toast 窗口透明色键（实现真圆角）
+TOAST_MR   = 24          # 通知距屏幕右侧
+TOAST_MB   = 76          # 通知距屏幕底部（任务栏上方）
+TOAST_GAP  = 10          # 通知间距
+TOAST_LIFE = 4500        # 通知停留时长（毫秒）
+TOAST_MAX  = 5           # 最大叠层数
+
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ChatDog.App.1.1")
 
 
 def resource_path(relative_path):
@@ -50,26 +66,78 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-def auto_allow_firewall():
+def app_dir():
+    """程序所在目录（打包后为 exe 所在目录），用于存放用户配置"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+PROFILE_FILE = os.path.join(app_dir(), "chatdog_profiles.json")
+
+
+def load_profiles():
+    """读取历史连接配置与上次昵称"""
+    try:
+        with open(PROFILE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get('entries'), list):
+            data.setdefault("last_nickname", "")
+            return data
+    except Exception:
+        pass
+    return {"last_nickname": "", "entries": []}
+
+
+def save_profiles(data):
+    try:
+        with open(PROFILE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_local_ips():
+    """获取本机所有可用 IPv4 地址（无网时也能拿到直连网卡地址）"""
+    ips = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))   # 不会真正发包，仅触发路由选择
+            ip = s.getsockname()[0]
+            if ip and ip not in ips:
+                ips.append(ip)
+        finally:
+            s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith('127.') and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips or ["127.0.0.1"]
+
+
+def auto_allow_firewall(protocol, port):
     """自动添加防火墙规则，避免用户手动放行（需管理员权限运行，
     打包时使用 --uac-admin 可自动获得管理员权限）"""
     try:
         if ctypes.windll.shell32.IsUserAnAdmin():
-            rule_name = "ChatDog_UDP_Auto"
+            rule_name = f"ChatDog_{protocol}_{port}_Auto"
             flags = 0x08000000  # 隐藏弹出的黑色CMD窗口
             # 先删除旧规则，避免每次启动重复添加导致规则堆积
             subprocess.run(
                 f'netsh advfirewall firewall delete rule name="{rule_name}"',
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=flags
             )
             subprocess.run(
-                f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=UDP localport={PORT}',
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                f'netsh advfirewall firewall add rule name="{rule_name}" '
+                f'dir=in action=allow protocol={protocol} localport={port}',
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=flags
             )
     except Exception:
@@ -161,20 +229,166 @@ def ask_input(master, title, message, initial="", ok_text="确定"):
     return dlg.result
 
 
-class ChatDogApp(ctk.CTk):
+# ---------- 叠层通知 Toast ----------
+class _Toast:
+    """手机通知风格的单条 Toast（叠层与位置由 ChatDogApp 管理）"""
+    W = 340
+    H = 96
+
+    def __init__(self, master, title, content, time_str, cid=""):
+        self.master = master
+        self.w, self.h = self.W, self.H
+        self.cur_x = self.cur_y = 0
+        self.target_x = self.target_y = 0
+        self._layout_anim_on = False
+        self._alive = True
+        self.on_close = None  # 由管理器注入
+
+        self.win = ctk.CTkToplevel(master)
+        self.win.withdraw()
+        self.win.overrideredirect(True)
+        self.win.attributes('-topmost', True)
+        try:
+            self.win.attributes('-transparentcolor', TRANS_KEY)
+            self.win.configure(fg_color=TRANS_KEY)
+        except Exception:
+            self.win.configure(fg_color=C_SURFACE)
+
+        card = ctk.CTkFrame(self.win, fg_color=C_SURFACE, corner_radius=14,
+                            border_width=1, border_color=C_BORDER)
+        card.pack(fill="both", expand=True)
+
+        color = NAME_COLORS[sum(ord(c) for c in str(cid or title)) % len(NAME_COLORS)]
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=14, pady=(11, 0))
+        avatar_txt = str(title)[:1].upper() if title else "·"
+        ctk.CTkLabel(head, text=avatar_txt, width=30, height=30, corner_radius=15,
+                     fg_color=color, text_color="#141519",
+                     font=(FONT, 13, "bold")).pack(side="left")
+        ctk.CTkLabel(head, text=title, font=(FONT, 12, "bold"), text_color=C_TEXT,
+                     anchor="w").pack(side="left", padx=(10, 8), fill="x", expand=True)
+        ctk.CTkLabel(head, text=time_str, font=(FONT, 9), text_color=C_DIM
+                     ).pack(side="right")
+        ctk.CTkLabel(card, text=content, font=(FONT, 11), text_color=C_DIM,
+                     anchor="w", justify="left", wraplength=self.W - 72
+                     ).pack(fill="x", padx=(54, 14), pady=(4, 10))
+
+        # 点击任意位置关闭
+        self._bind_close(card)
+
+    def _bind_close(self, widget):
+        widget.bind("<Button-1>", lambda e: self.close_now())
+        for child in widget.winfo_children():
+            self._bind_close(child)
+
+    # ----- 位置动画 -----
+    def set_target(self, x, y):
+        self.target_x, self.target_y = x, y
+        if not self._layout_anim_on:
+            self._layout_anim_on = True
+            self._layout_step()
+
+    def _layout_step(self):
+        if not self._alive or not self.win.winfo_exists():
+            self._layout_anim_on = False
+            return
+        dx = self.target_x - self.cur_x
+        dy = self.target_y - self.cur_y
+        if abs(dx) < 1 and abs(dy) < 1:
+            self.cur_x, self.cur_y = self.target_x, self.target_y
+            self._apply_geo()
+            self._layout_anim_on = False
+            return
+        self.cur_x += dx * 0.28
+        self.cur_y += dy * 0.28
+        self._apply_geo()
+        self.win.after(16, self._layout_step)
+
+    def _apply_geo(self):
+        try:
+            self.win.geometry(f"{int(self.w)}x{int(self.h)}+{int(self.cur_x)}+{int(self.cur_y)}")
+        except Exception:
+            pass
+
+    def fade_in(self):
+        a = [0.0]
+
+        def step():
+            if not self._alive or not self.win.winfo_exists():
+                return
+            a[0] = min(1.0, a[0] + 0.12)
+            self.win.attributes('-alpha', a[0])
+            if a[0] < 1.0:
+                self.win.after(18, step)
+        step()
+
+    def close_now(self):
+        if not self._alive:
+            return
+        self._alive = False
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+    def play_disappear(self):
+        """消失动画：从下到上移动 + 快速变小变淡"""
+        ox, oy = self.cur_x, self.cur_y
+        ow, oh = self.w, self.h
+        steps = 12
+
+        def step(i):
+            if not self._alive:
+                return
+            if not self.win.winfo_exists():
+                self._alive = False
+                return
+            if i > steps:
+                self._alive = False
+                try:
+                    self.win.destroy()
+                except Exception:
+                    pass
+                return
+            k = i / steps
+            nw = int(ow * (1 - 0.42 * k))          # 快速变小
+            nh = int(oh * (1 - 0.42 * k))
+            nx = int(ox + (ow - nw) / 2)           # 居中收缩
+            ny = int(oy - 52 * k)                  # 从下到上移动
+            try:
+                self.win.geometry(f"{nw}x{nh}+{nx}+{ny}")
+                self.win.attributes('-alpha', 1.0 - k)  # 变淡
+            except Exception:
+                pass
+            self.win.after(16, lambda: step(i + 1))
+        step(0)
+
+
+# ---------- 启动模式选择窗口 ----------
+class LaunchWindow(ctk.CTk):
+    MODE_INFO = {
+        "lan": ("默认模式 · 局域网", "连接同一 WiFi / 热点，自动发现其他用户"),
+        "server": ("服务器模式 · 我做主机", "完全无网可用！其他人直连你的 IP 和端口（网线直连/无路由器场景）"),
+        "client": ("客户端模式 · 连接主机", "完全无网可用！输入对方的 IP 和端口直连对方"),
+    }
+
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("dark")
-        self.title("ChatDog")
-        self.geometry("760x740")
-        self.minsize(620, 640)
+        ctk.set_appearance_mode("light")
+        self.title("ChatDog · 启动")
         self.configure(fg_color=C_BG)
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(620, sw - 80), min(720, sh - 140)
+        self.update_idletasks()
+        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(8, (sh - h) // 2)}")
+        self.minsize(560, 560)
+        self.result = None
 
-        # 程序启动时自动放行防火墙
-        auto_allow_firewall()
-
-        # 设置窗口和任务栏图标
         try:
             icon_path = resource_path("icon.ico")
             if os.path.exists(icon_path):
@@ -182,24 +396,326 @@ class ChatDogApp(ctk.CTk):
         except Exception:
             pass
 
-        # 唯一客户端ID + 昵称
-        self.client_id = str(uuid.uuid4())[:8]
-        default_name = f"用户_{self.client_id}"
-        self.nickname = (ask_input(self, "欢迎来到 ChatDog",
-                                   "首次使用，请输入你的昵称：", initial=default_name)
-                         or default_name)
+        self.profiles = load_profiles()
+        self._mode = ctk.StringVar(value="lan")
+        self._port = ctk.StringVar(value=str(DEFAULT_TCP_PORT))
+        self._host = ctk.StringVar(value="")
+        self._mode_cards = {}
+        self._param_areas = {}
+        self._copy_btns = []
 
-        # 创建 UDP socket，开启广播
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(('0.0.0.0', PORT))
+        self.setup_ui()
+
+    # ---------- UI ----------
+    def setup_ui(self):
+        # 整体可滚动，适配低分辨率屏幕
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.scroll.pack(fill="both", expand=True)
+
+        # ===== 标题区 =====
+        head = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        head.pack(fill="x", padx=24, pady=(20, 4))
+        ctk.CTkLabel(head, text="C", width=52, height=52, corner_radius=26,
+                     fg_color=C_ACCENT, text_color="#ffffff",
+                     font=(FONT, 22, "bold")).pack(side="left", padx=(0, 12))
+        hb = ctk.CTkFrame(head, fg_color="transparent")
+        hb.pack(side="left", fill="y")
+        ctk.CTkLabel(hb, text="ChatDog", font=(FONT, 22, "bold"),
+                     text_color=C_TEXT, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(hb, text="选择启动模式 · 支持完全无网环境",
+                     font=(FONT, 11), text_color=C_DIM, anchor="w").pack(anchor="w")
+
+        # ===== 历史配置 =====
+        hrow = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        hrow.pack(fill="x", padx=26, pady=(12, 4))
+        ctk.CTkLabel(hrow, text="历史配置", font=(FONT, 13, "bold"),
+                     text_color=C_TEXT).pack(side="left")
+        ctk.CTkLabel(hrow, text="（🚀 一键启动 · 📌 顶置 · ✏ 重命名 · 🗑 删除）",
+                     font=(FONT, 10), text_color=C_DIM).pack(side="left", padx=(8, 0))
+
+        self.hist_frame = ctk.CTkScrollableFrame(
+            self.scroll, fg_color=C_SURFACE, corner_radius=14,
+            border_width=1, border_color=C_BORDER, height=170)
+        self.hist_frame.pack(fill="x", padx=24, pady=(0, 4))
+        self.hist_frame.pack_propagate(False)
+        self.refresh_history()
+
+        # ===== 模式选择 =====
+        ctk.CTkLabel(self.scroll, text="启动模式", font=(FONT, 13, "bold"),
+                     text_color=C_TEXT, anchor="w").pack(fill="x", padx=26, pady=(12, 6))
+
+        self._mode_option("lan")
+        self._mode_option("server", self._build_server_params)
+        self._mode_option("client", self._build_client_params)
+
+        # ===== 启动按钮 =====
+        ctk.CTkButton(self.scroll, text="🚀 启动 ChatDog", height=52, corner_radius=14,
+                      fg_color=C_ACCENT, hover_color=C_ACCENT_D, text_color="#1c1408",
+                      font=(FONT, 15, "bold"), command=self._launch
+                      ).pack(fill="x", padx=24, pady=(16, 20))
+        self.bind("<Return>", lambda ev: self._launch())
+
+        self._sync_param_visibility()
+
+    def _mode_option(self, value, param_builder=None):
+        title, desc = self.MODE_INFO[value]
+        card = ctk.CTkFrame(self.scroll, fg_color=C_SURFACE, corner_radius=12,
+                            border_width=1, border_color=C_BORDER)
+        card.pack(fill="x", padx=24, pady=5)
+
+        rb = ctk.CTkRadioButton(card, text=title, variable=self._mode, value=value,
+                                font=(FONT, 13, "bold"), text_color=C_TEXT,
+                                fg_color=C_ACCENT, hover_color=C_ACCENT_D,
+                                border_color=C_BORDER,
+                                command=self._sync_param_visibility)
+        rb.pack(anchor="w", padx=14, pady=(10, 0))
+        ctk.CTkLabel(card, text=desc, font=(FONT, 10), text_color=C_DIM,
+                     anchor="w", justify="left", wraplength=520
+                     ).pack(anchor="w", padx=42, pady=(0, 9))
+
+        area = ctk.CTkFrame(card, fg_color="transparent")
+        if param_builder:
+            param_builder(area)
+        self._mode_cards[value] = card
+        self._param_areas[value] = area
+
+        def _select(e=None):
+            self._mode.set(value)
+            self._sync_param_visibility()
+        card.bind("<Button-1>", _select)
+
+    def _build_server_params(self, area):
+        row = ctk.CTkFrame(area, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(row, text="监听端口", font=(FONT, 11), text_color=C_DIM
+                     ).pack(side="left")
+        ctk.CTkEntry(row, width=110, height=34, corner_radius=8, textvariable=self._port,
+                     fg_color=C_SURFACE2, border_width=1, border_color=C_BORDER,
+                     text_color=C_TEXT, font=(FONT, 12)).pack(side="left", padx=(8, 0))
+
+        ipbox = ctk.CTkFrame(area, fg_color="transparent")
+        ipbox.pack(fill="x")
+        ctk.CTkLabel(ipbox, text="本机 IP（告诉要连你的人，点击复制）：",
+                     font=(FONT, 11), text_color=C_DIM).pack(anchor="w")
+        for ip in get_local_ips():
+            btn = ctk.CTkButton(ipbox, text=f"  {ip}  📋  ", width=170, height=30,
+                                corner_radius=8, fg_color=C_SURFACE2, hover_color=C_BORDER,
+                                text_color=C_TEXT, font=(FONT, 11, "bold"),
+                                anchor="w", command=lambda i=ip: self._copy_ip(i, btn))
+            btn.pack(anchor="w", pady=3)
+            self._copy_btns.append(btn)
+
+    def _build_client_params(self, area):
+        row1 = ctk.CTkFrame(area, fg_color="transparent")
+        row1.pack(fill="x")
+        ctk.CTkLabel(row1, text="服务器 IP", width=76, font=(FONT, 11),
+                     text_color=C_DIM, anchor="w").pack(side="left")
+        ctk.CTkEntry(row1, height=34, corner_radius=8, textvariable=self._host,
+                     placeholder_text="例如 192.168.137.1", fg_color=C_SURFACE2,
+                     border_width=1, border_color=C_BORDER, text_color=C_TEXT,
+                     font=(FONT, 12)).pack(side="left", fill="x", expand=True, padx=(8, 0))
+        row2 = ctk.CTkFrame(area, fg_color="transparent")
+        row2.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(row2, text="端口", width=76, font=(FONT, 11),
+                     text_color=C_DIM, anchor="w").pack(side="left")
+        ctk.CTkEntry(row2, width=110, height=34, corner_radius=8, textvariable=self._port,
+                     fg_color=C_SURFACE2, border_width=1, border_color=C_BORDER,
+                     text_color=C_TEXT, font=(FONT, 12)).pack(side="left", padx=(8, 0))
+
+    def _sync_param_visibility(self):
+        m = self._mode.get()
+        for v, area in self._param_areas.items():
+            if v == m:
+                area.pack(fill="x", padx=42, pady=(0, 12))
+            else:
+                area.pack_forget()
+        for v, card in self._mode_cards.items():
+            card.configure(border_color=C_ACCENT if v == m else C_BORDER)
+
+    def _copy_ip(self, ip, btn):
+        self.clipboard_clear()
+        self.clipboard_append(ip)
+        btn.configure(text=f"  {ip}  ✓ 已复制  ")
+        self.after(1200, lambda: btn.configure(text=f"  {ip}  📋  "))
+
+    # ---------- 历史配置 ----------
+    def refresh_history(self):
+        for w in self.hist_frame.winfo_children():
+            w.destroy()
+        entries = sorted(self.profiles.get("entries", []),
+                         key=lambda e: (not e.get("pinned"), -e.get("last_used", 0)))
+        if not entries:
+            ctk.CTkLabel(self.hist_frame, text="暂无历史配置\n选择下方模式启动后会自动保存到此处",
+                         font=(FONT, 11), text_color=C_DIM, justify="center"
+                         ).pack(expand=True, pady=30)
+            return
+        for e in entries:
+            self._add_history_card(e)
+
+    def _add_history_card(self, e):
+        mode = e.get("mode", "lan")
+        card = ctk.CTkFrame(self.hist_frame, fg_color=C_SURFACE2, corner_radius=12,
+                            border_width=1, border_color=C_BORDER)
+        card.pack(fill="x", pady=5, padx=2)
+
+        main = ctk.CTkFrame(card, fg_color="transparent")
+        main.pack(side="left", fill="both", expand=True, pady=8, padx=(14, 0))
+        pin = "📌 " if e.get("pinned") else ""
+        desc = {
+            "lan": "默认模式 · 局域网自动发现",
+            "server": f"服务器模式 · 监听端口 {e.get('port')}",
+            "client": f"客户端模式 · {e.get('host', '?')}:{e.get('port')}",
+        }.get(mode, mode)
+        ctk.CTkLabel(main, text=pin + e.get("name", "未命名"), font=(FONT, 13, "bold"),
+                     text_color=C_TEXT, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(main, text=desc, font=(FONT, 10), text_color=C_DIM,
+                     anchor="w").pack(anchor="w")
+
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(side="right", padx=(0, 10))
+        small = dict(height=30, corner_radius=8, fg_color=C_SURFACE, hover_color=C_BORDER,
+                     text_color=C_DIM, font=(FONT, 12), border_width=1, border_color=C_BORDER)
+        ctk.CTkButton(btns, text="🚀 启动", width=78, text_color="#1c1408",
+                      fg_color=C_ACCENT, hover_color=C_ACCENT_D, corner_radius=8,
+                      height=30, font=(FONT, 11, "bold"),
+                      command=lambda: self._use_entry(e)).pack(side="left", padx=(6, 0))
+        pin_txt = "📍" if e.get("pinned") else "📌"
+        ctk.CTkButton(btns, text=pin_txt, width=38,
+                      command=lambda: self._pin_entry(e), **small).pack(side="left")
+        ctk.CTkButton(btns, text="✏", width=38,
+                      command=lambda: self._rename_entry(e), **small).pack(side="left")
+        del_btn = dict(small)
+        del_btn["text_color"] = C_RED
+        ctk.CTkButton(btns, text="🗑", width=38,
+                      command=lambda: self._delete_entry(e), **del_btn).pack(side="left")
+
+    def _find_entry(self, e):
+        for x in self.profiles.get("entries", []):
+            if x is e or x.get("id") == e.get("id"):
+                return x
+        return None
+
+    def _use_entry(self, e):
+        try:
+            port = int(e.get("port", DEFAULT_TCP_PORT))
+        except Exception:
+            port = DEFAULT_TCP_PORT
+        self.result = {"mode": e.get("mode", "lan"), "host": e.get("host", ""), "port": port}
+        e["last_used"] = time.time()
+        save_profiles(self.profiles)
+        self.destroy()
+
+    def _pin_entry(self, e):
+        e["pinned"] = not e.get("pinned", False)
+        save_profiles(self.profiles)
+        self.refresh_history()
+
+    def _rename_entry(self, e):
+        name = ask_input(self, "重命名配置", "为这条配置起个好记的名字：",
+                         initial=e.get("name", ""))
+        if name and name.strip():
+            e["name"] = name.strip()
+            save_profiles(self.profiles)
+            self.refresh_history()
+
+    def _delete_entry(self, e):
+        if ask_confirm(self, "删除配置", f"确定删除「{e.get('name', '')}」吗？",
+                       ok_text="删除", danger=True):
+            entries = self.profiles.get("entries", [])
+            self.profiles["entries"] = [x for x in entries if x is not e and x.get("id") != e.get("id")]
+            save_profiles(self.profiles)
+            self.refresh_history()
+
+    # ---------- 启动 ----------
+    def _launch(self):
+        if self.result is not None:
+            return
+        m = self._mode.get()
+        cfg = {"mode": m, "host": "", "port": DEFAULT_TCP_PORT}
+        try:
+            port = int(self._port.get())
+        except Exception:
+            port = 0
+        if port <= 0 or port > 65535:
+            self._warn("端口无效", "请输入 1 ~ 65535 之间的端口号")
+            return
+        cfg["port"] = port
+        if m == "client":
+            host = self._host.get().strip()
+            if not host:
+                self._warn("缺少 IP", "请输入要连接的服务器 IP 地址")
+                return
+            cfg["host"] = host
+        self._save_profile(cfg)
+        self.result = cfg
+        self.destroy()
+
+    def _warn(self, title, msg):
+        dlg = _Dialog(self, title, msg, ok_text="知道了", cancel_text="关闭")
+        self.wait_window(dlg)
+
+    def _save_profile(self, cfg):
+        entries = self.profiles.setdefault("entries", [])
+        key = (cfg["mode"], cfg.get("host", ""), cfg.get("port"))
+        for e in entries:
+            if (e.get("mode"), e.get("host", ""), e.get("port")) == key:
+                e["last_used"] = time.time()
+                break
+        else:
+            name = {
+                "lan": "默认模式 · 局域网",
+                "server": f"我的服务器 :{cfg['port']}",
+                "client": f"直连 {cfg['host']}:{cfg['port']}",
+            }[cfg["mode"]]
+            entries.append({"id": str(uuid.uuid4())[:8], "name": name,
+                            "mode": cfg["mode"], "host": cfg.get("host", ""),
+                            "port": cfg["port"], "pinned": False, "last_used": time.time()})
+        # 上限 12 条：超出时删掉最旧的未顶置条目
+        unpinned = [e for e in entries if not e.get("pinned")]
+        unpinned.sort(key=lambda e: e.get("last_used", 0))
+        while len(entries) > 12 and unpinned:
+            entries.remove(unpinned.pop(0))
+        save_profiles(self.profiles)
+
+
+# ---------- 主应用 ----------
+class ChatDogApp(ctk.CTk):
+    def __init__(self, mode="lan", host="", port=DEFAULT_TCP_PORT):
+        super().__init__()
+        ctk.set_appearance_mode("light")
+        self.title("ChatDog")
+        self.configure(fg_color=C_BG)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(760, sw - 80), min(740, sh - 140)
+        self.geometry(f"{w}x{h}+{max(8, (sw - w) // 2)}+{max(8, (sh - h) // 2)}")
+        self.minsize(560, 560)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # 连接模式: lan / server / client
+        self.mode = mode
+        self.host = host
+        self.port = port
+
+        # 唯一客户端ID + 昵称（从上次使用记忆中读取，集成在主窗口顶栏可编辑）
+        self.client_id = str(uuid.uuid4())[:8]
+        prof = load_profiles()
+        self.nickname = (prof.get("last_nickname") or "").strip() or f"用户_{self.client_id}"
 
         # 在线用户表: client_id -> {"addr": (ip, port), "name": 昵称, "last_seen": 时间戳}
         self.peers = {}
         self.peers_lock = threading.Lock()
         self._bcast_cache = None
         self._bcast_cache_time = 0
+
+        # TCP 连接管理
+        self.tcp_sock = None            # 客户端模式: 到服务器的连接
+        self.srv_sock = None            # 服务器模式: 监听 socket
+        self.tcp_conns = []             # 服务器模式: [{"conn":.., "id":.., "name":..}]
+        self.tcp_lock = threading.Lock()
+        self.roster_members = []        # 客户端模式: 服务器广播的在线名单
+
+        # 叠层通知
+        self._toasts = []
 
         # 默认快捷消息 (1为警告专用，2-0用户可自定义)
         self.shortcut_messages = {
@@ -215,43 +731,96 @@ class ChatDogApp(ctk.CTk):
             0: "哈哈哈哈"
         }
 
-        # 记录已经收到过的消息ID，防止多网卡导致重复接收
+        # 记录已经收到过的消息ID，防止多网卡/转发导致重复接收
         self.received_msg_ids = set()
         self._first_block = True
+
+        # 程序启动时自动放行防火墙
+        if self.mode == "lan":
+            auto_allow_firewall("UDP", PORT)
+        elif self.mode == "server":
+            auto_allow_firewall("TCP", self.port)
+
+        # 设置窗口和任务栏图标
+        try:
+            icon_path = resource_path("icon.ico")
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
+        except Exception:
+            pass
+
+        # UDP socket 仅默认模式创建
+        if self.mode == "lan":
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(('0.0.0.0', PORT))
+        else:
+            self.sock = None
 
         self.setup_ui()
         self.bind_shortcuts()
 
-        # 启动接收线程和心跳广播线程
+        # 启动网络线程
         self.running = True
-        threading.Thread(target=self.receive_loop, daemon=True).start()
-        threading.Thread(target=self.announce_loop, daemon=True).start()
-
-        # 本地欢迎提示 + 广播上线通知
-        self.append_system("已就绪 · 等待同一局域网内的其他用户上线")
-        self.send_message("已上线", msg_type="system")
+        if self.mode == "lan":
+            threading.Thread(target=self.receive_loop, daemon=True).start()
+            threading.Thread(target=self.announce_loop, daemon=True).start()
+            self.append_system("已就绪 · 等待同一局域网内的其他用户上线")
+            self.send_message("已上线", msg_type="system")
+        elif self.mode == "server":
+            self.start_server()
+        else:
+            self.start_client()
 
     # ---------- UI ----------
+    def mode_desc(self):
+        if self.mode == "lan":
+            return "局域网群聊"
+        if self.mode == "server":
+            ips = get_local_ips()
+            return f"服务器 · 你的 IP {ips[0]} :{self.port}"
+        return f"连接 {self.host}:{self.port}"
+
+    def mode_badge(self):
+        if self.mode == "lan":
+            return f" UDP {PORT} "
+        if self.mode == "server":
+            return f" 服务器 :{self.port} "
+        return f" 客户端 {self.host}:{self.port} "
+
     def setup_ui(self):
         # ===== 顶栏卡片 =====
         head = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=14,
                             border_width=1, border_color=C_BORDER)
         head.pack(fill="x", padx=16, pady=(16, 10))
 
-        ctk.CTkLabel(head, text="🐶", font=(FONT, 30)).pack(side="left", padx=(16, 10))
+        ctk.CTkLabel(head, text="C", width=44, height=44, corner_radius=22,
+                     fg_color=C_ACCENT, text_color="#ffffff",
+                     font=(FONT, 19, "bold")).pack(side="left", padx=(16, 10))
         tbox = ctk.CTkFrame(head, fg_color="transparent")
         tbox.pack(side="left", fill="y", pady=12)
         ctk.CTkLabel(tbox, text="ChatDog", font=(FONT, 20, "bold"),
                      text_color=C_TEXT, anchor="w").pack(anchor="w")
-        ctk.CTkLabel(tbox, text=f"{self.nickname} · 局域网群聊",
-                     font=(FONT, 11), text_color=C_DIM, anchor="w").pack(anchor="w")
+        # 昵称输入（集成在主窗口，Enter/失焦保存并广播改名）
+        sub = ctk.CTkFrame(tbox, fg_color="transparent")
+        sub.pack(anchor="w")
+        self.name_entry = ctk.CTkEntry(sub, width=132, height=28, corner_radius=8,
+                                       fg_color=C_SURFACE2, border_width=0,
+                                       text_color=C_TEXT, font=(FONT, 11))
+        self.name_entry.insert(0, self.nickname)
+        self.name_entry.pack(side="left")
+        self.name_entry.bind("<Return>", self._commit_nickname)
+        self.name_entry.bind("<FocusOut>", self._commit_nickname)
+        ctk.CTkLabel(sub, text=f"· {self.mode_desc()}", font=(FONT, 11),
+                     text_color=C_DIM).pack(side="left", padx=(8, 0))
 
         # 在线人数徽章（定时刷新）
         self.online_lbl = ctk.CTkLabel(
             head, text=" ● 在线 1 人 ", font=(FONT, 11, "bold"),
-            text_color=C_ACCENT, fg_color="#2c2513", corner_radius=8, height=28)
+            text_color="#a86e00", fg_color="#fdf0d5", corner_radius=8, height=28)
         self.online_lbl.pack(side="right", padx=(8, 12))
-        ctk.CTkLabel(head, text=f" UDP {PORT} ", font=(FONT, 11),
+        ctk.CTkLabel(head, text=self.mode_badge(), font=(FONT, 11),
                      text_color=C_DIM, fg_color=C_SURFACE2, corner_radius=8, height=28
                      ).pack(side="right")
         self.after(1500, self.refresh_online)
@@ -294,9 +863,37 @@ class ChatDogApp(ctk.CTk):
                       border_color=C_BORDER, text_color=C_TEXT, font=(FONT, 12),
                       command=self.open_shortcut_settings).pack(side="left")
         ctk.CTkButton(bot, text="🚨 紧急警告 (Ctrl+1)", width=175, height=38, corner_radius=10,
-                      fg_color=C_RED_BG, hover_color="#451a1a", border_width=1,
-                      border_color="#5c2323", text_color=C_RED, font=(FONT, 12, "bold"),
+                      fg_color=C_RED_BG, hover_color="#f5d6d6", border_width=1,
+                      border_color="#e8b4b4", text_color=C_RED, font=(FONT, 12, "bold"),
                       command=self.send_alert).pack(side="right")
+
+    # ---------- 昵称（主窗口内编辑 + 记忆 + 广播改名） ----------
+    def _commit_nickname(self, event=None):
+        try:
+            new = self.name_entry.get().strip()
+        except Exception:
+            return
+        if not new:
+            try:
+                self.name_entry.delete(0, "end")
+                self.name_entry.insert(0, self.nickname)
+            except Exception:
+                pass
+            return
+        if new == self.nickname:
+            return
+        old = self.nickname
+        self.nickname = new
+        prof = load_profiles()
+        prof["last_nickname"] = new
+        save_profiles(prof)
+        self.append_system(f"你已改名为 {new}")
+        try:
+            self.send_message(f"{old} 已改名为 {new}", "system")
+            if self.mode == "server":
+                self.broadcast_roster()
+        except Exception:
+            pass
 
     def _font(self, size, style="normal"):
         """按系统 DPI 缩放生成字体元组（Text tag 不随 CTk 自动缩放）"""
@@ -318,7 +915,7 @@ class ChatDogApp(ctk.CTk):
         t("s_time", font=self._font(9), foreground=C_DIM, justify="right", rmargin=16)
         t("s_bub", font=self._font(12), background=C_SELF_BG, foreground=C_SELF_TX,
           justify="right", lmargin1=170, lmargin2=170, rmargin=16, spacing1=5, spacing3=5)
-        t("alert", font=self._font(12, "bold"), background=C_RED_BG, foreground="#ff9d9d",
+        t("alert", font=self._font(12, "bold"), background=C_RED_BG, foreground="#c0272d",
           justify="center", spacing1=8, spacing3=8, lmargin1=18, lmargin2=18, rmargin=18)
 
     def _name_tag(self, cid):
@@ -375,12 +972,19 @@ class ChatDogApp(ctk.CTk):
 
     def refresh_online(self):
         try:
-            n = len(self.get_active_peers()) + 1
-            self.online_lbl.configure(text=f" ● 在线 {n} 人 ")
+            self.online_lbl.configure(text=f" ● 在线 {self.get_online_count()} 人 ")
         except Exception:
             pass
         if self.running:
             self.after(1500, self.refresh_online)
+
+    def get_online_count(self):
+        if self.mode == "lan":
+            return len(self.get_active_peers()) + 1
+        if self.mode == "server":
+            with self.tcp_lock:
+                return len(self.tcp_conns) + 1
+        return max(1, len(self.roster_members))
 
     def update_shortcut_display(self):
         keys = [2, 3, 4, 5, 6, 7, 8, 9, 0]
@@ -453,7 +1057,7 @@ class ChatDogApp(ctk.CTk):
                       font=(FONT, 13, "bold"), command=save_settings
                       ).pack(fill="x", padx=22, pady=(14, 20))
 
-    # ---------- 网络辅助 ----------
+    # ================= 网络层：默认模式(UDP) =================
     def get_broadcast_addrs(self):
         """获取本机所有网卡的广播地址（带缓存）"""
         now = time.time()
@@ -517,6 +1121,220 @@ class ChatDogApp(ctk.CTk):
                 pass
             time.sleep(ANNOUNCE_INTERVAL)
 
+    def receive_loop(self):
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(65535)
+                msg = json.loads(data.decode('utf-8'))
+                if msg.get('id') == self.client_id:
+                    continue
+                # 只要收到对方的任何包（包括心跳），就记住对方地址，
+                # 之后发消息会同时单播给对方，确保双向可达
+                self.register_peer(msg.get('id'), addr, msg.get('name', '未知'))
+                self.after(0, lambda m=msg: self.handle_message(m))
+            except OSError:
+                break
+            except Exception:
+                pass
+
+    # ================= 网络层：服务器模式(TCP) =================
+    def start_server(self):
+        try:
+            self.srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.srv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.srv_sock.bind(('0.0.0.0', self.port))
+            self.srv_sock.listen(20)
+            self.srv_sock.settimeout(1.0)
+        except Exception as e:
+            self.append_system(f"× 服务器启动失败: {e}")
+            return
+        threading.Thread(target=self.server_accept_loop, daemon=True).start()
+        self.append_system(f"服务器模式 · 正在监听端口 {self.port}，等待其他人连接")
+        ips = ", ".join(get_local_ips())
+        self.append_system(f"把你的 IP 和端口告诉其他人即可互连 → {ips} :{self.port}")
+
+    def server_accept_loop(self):
+        while self.running:
+            try:
+                conn, addr = self.srv_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception:
+                continue
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+            threading.Thread(target=self.server_client_loop, args=(conn, addr),
+                             daemon=True).start()
+
+    def server_client_loop(self, conn, addr):
+        """服务器处理单个客户端连接：收消息、显示、转发"""
+        buf = b""
+        name = "未知"
+        cid = None
+        try:
+            while self.running:
+                data = conn.recv(65536)
+                if not data:
+                    break
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line.decode('utf-8'))
+                    except Exception:
+                        continue
+                    if msg.get('id') == self.client_id:
+                        continue
+                    t = msg.get('type', 'normal')
+                    cid = msg.get('id') or cid
+                    name = msg.get('name') or name
+                    if t == 'hello':
+                        # 客户端上线：注册并广播加入消息 + 在线名单
+                        self._srv_register(conn, cid, name)
+                        join = {"id": cid, "msg_uid": str(uuid.uuid4()), "name": name,
+                                "type": "system", "content": "加入了聊天",
+                                "time": datetime.now().strftime("%H:%M:%S")}
+                        self._safe_after(lambda n=name: self.append_system(f"* {n} 加入了聊天 *"))
+                        self.server_broadcast((json.dumps(join) + "\n").encode('utf-8'))
+                        self.broadcast_roster()
+                        continue
+                    if t == 'ping' or t == 'roster':
+                        continue
+                    # 本地显示 + 转发给其他客户端
+                    self._safe_after(lambda m=msg: self.handle_message(m))
+                    self.server_relay(conn, line + b"\n")
+        except Exception:
+            pass
+        finally:
+            self._srv_unregister(conn, name)
+
+    def _srv_register(self, conn, cid, name):
+        with self.tcp_lock:
+            for c in self.tcp_conns:
+                if c["conn"] is conn:
+                    c["id"] = cid
+                    c["name"] = name
+                    break
+            else:
+                self.tcp_conns.append({"conn": conn, "id": cid, "name": name})
+
+    def _srv_unregister(self, conn, name):
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with self.tcp_lock:
+            self.tcp_conns = [c for c in self.tcp_conns if c["conn"] is not conn]
+        leave = {"id": str(uuid.uuid4())[:8], "msg_uid": str(uuid.uuid4()), "name": name,
+                 "type": "system", "content": "离开了聊天",
+                 "time": datetime.now().strftime("%H:%M:%S")}
+        self._safe_after(lambda n=name: self.append_system(f"* {n} 离开了聊天 *"))
+        self.server_broadcast((json.dumps(leave) + "\n").encode('utf-8'))
+        self.broadcast_roster()
+
+    def server_broadcast(self, data):
+        """服务器：把数据发给所有已连接的客户端"""
+        with self.tcp_lock:
+            conns = [c["conn"] for c in self.tcp_conns]
+        for c in conns:
+            try:
+                c.sendall(data)
+            except Exception:
+                pass
+
+    def server_relay(self, from_conn, data):
+        """服务器：把某客户端的消息转发给其他所有客户端"""
+        with self.tcp_lock:
+            conns = [c["conn"] for c in self.tcp_conns if c["conn"] is not from_conn]
+        for c in conns:
+            try:
+                c.sendall(data)
+            except Exception:
+                pass
+
+    def broadcast_roster(self):
+        """服务器：向所有客户端广播当前在线名单"""
+        members = [{"id": self.client_id, "name": self.nickname}]
+        with self.tcp_lock:
+            for c in self.tcp_conns:
+                if c.get("id"):
+                    members.append({"id": c["id"], "name": c["name"]})
+        msg = {"id": self.client_id, "msg_uid": str(uuid.uuid4()), "name": self.nickname,
+               "type": "roster", "members": members, "content": "",
+               "time": datetime.now().strftime("%H:%M:%S")}
+        self.server_broadcast((json.dumps(msg) + "\n").encode('utf-8'))
+
+    # ================= 网络层：客户端模式(TCP) =================
+    def start_client(self):
+        self.append_system(f"客户端模式 · 正在连接 {self.host}:{self.port} …")
+        threading.Thread(target=self.client_loop, daemon=True).start()
+
+    def client_loop(self):
+        """客户端主循环：连接服务器，断开后每 3 秒自动重连"""
+        while self.running:
+            sock = None
+            try:
+                sock = socket.create_connection((self.host, self.port), timeout=5)
+                sock.settimeout(None)
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except Exception:
+                    pass
+                with self.tcp_lock:
+                    self.tcp_sock = sock
+                self._safe_after(lambda: self.append_system(
+                    f"已连接服务器 {self.host}:{self.port}"))
+                hello = {"id": self.client_id, "msg_uid": str(uuid.uuid4()),
+                         "name": self.nickname, "type": "hello", "content": "",
+                         "time": datetime.now().strftime("%H:%M:%S")}
+                sock.sendall((json.dumps(hello) + "\n").encode('utf-8'))
+                buf = b""
+                while self.running:
+                    data = sock.recv(65536)
+                    if not data:
+                        break
+                    buf += data
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        try:
+                            msg = json.loads(line.decode('utf-8'))
+                        except Exception:
+                            continue
+                        if msg.get('id') == self.client_id:
+                            continue
+                        self._safe_after(lambda m=msg: self.handle_message(m))
+            except Exception:
+                pass
+            finally:
+                with self.tcp_lock:
+                    self.tcp_sock = None
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            if not self.running:
+                break
+            self._safe_after(lambda: self.append_system(
+                f"与服务器 {self.host}:{self.port} 断开，3 秒后自动重连…"))
+            time.sleep(3)
+
+    def _safe_after(self, fn):
+        """从网络线程安全地调度 UI 操作"""
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
+    # ================= 统一发送入口 =================
     def send_message(self, content, msg_type="normal"):
         msg = {
             "id": self.client_id,
@@ -526,19 +1344,30 @@ class ChatDogApp(ctk.CTk):
             "content": content,
             "time": datetime.now().strftime("%H:%M:%S"),
         }
-        data = json.dumps(msg).encode('utf-8')
-        # 1) 广播：覆盖尚未被发现的在线用户
-        for bcast in self.get_broadcast_addrs():
-            try:
-                self.sock.sendto(data, (bcast, PORT))
-            except Exception:
-                pass
-        # 2) 单播：直接发给每个已知在线用户（修复广播被丢弃导致收不到消息的问题）
-        for addr in self.get_active_peers():
-            try:
-                self.sock.sendto(data, addr)
-            except Exception:
-                pass
+        if self.mode == "lan":
+            data = json.dumps(msg).encode('utf-8')
+            # 1) 广播：覆盖尚未被发现的在线用户
+            for bcast in self.get_broadcast_addrs():
+                try:
+                    self.sock.sendto(data, (bcast, PORT))
+                except Exception:
+                    pass
+            # 2) 单播：直接发给每个已知在线用户（修复广播被丢弃导致收不到消息的问题）
+            for addr in self.get_active_peers():
+                try:
+                    self.sock.sendto(data, addr)
+                except Exception:
+                    pass
+        elif self.mode == "server":
+            self.server_broadcast((json.dumps(msg) + "\n").encode('utf-8'))
+        elif self.mode == "client":
+            with self.tcp_lock:
+                s = self.tcp_sock
+            if s:
+                try:
+                    s.sendall((json.dumps(msg) + "\n").encode('utf-8'))
+                except Exception:
+                    pass
 
     def send_normal(self):
         content = self.entry.get().strip()
@@ -564,28 +1393,16 @@ class ChatDogApp(ctk.CTk):
         self.send_message(content, "alert")
         self.append_alert(f"⚠ 你发出了紧急警告: {content}")
 
-    def receive_loop(self):
-        while self.running:
-            try:
-                data, addr = self.sock.recvfrom(65535)
-                msg = json.loads(data.decode('utf-8'))
-                if msg.get('id') == self.client_id:
-                    continue
-                # 只要收到对方的任何包（包括心跳），就记住对方地址，
-                # 之后发消息会同时单播给对方，确保双向可达
-                self.register_peer(msg.get('id'), addr, msg.get('name', '未知'))
-                self.after(0, lambda m=msg: self.handle_message(m))
-            except OSError:
-                break
-            except Exception:
-                pass
-
+    # ================= 消息处理 =================
     def handle_message(self, msg):
-        # 心跳包仅用于在线发现，不显示
-        if msg.get('type') == 'ping':
+        # 心跳/hello/roster 包仅用于在线发现与名单同步，不显示
+        t = msg.get('type', 'normal')
+        if t in ('ping', 'hello', 'roster'):
+            if t == 'roster':
+                self.roster_members = msg.get('members', [])
             return
 
-        # 去重逻辑，防止广播+单播/多网卡导致接收两次
+        # 去重逻辑，防止广播+单播/多网卡/服务器转发导致重复接收
         msg_uid = msg.get('msg_uid')
         if not msg_uid or msg_uid in self.received_msg_ids:
             return
@@ -595,7 +1412,6 @@ class ChatDogApp(ctk.CTk):
         if len(self.received_msg_ids) > 100:
             self.received_msg_ids = set(list(self.received_msg_ids)[-50:])
 
-        t = msg.get('type', 'normal')
         time_str = msg.get('time', '')
         name = msg.get('name', '未知')
         cid = msg.get('id', '')
@@ -610,51 +1426,65 @@ class ChatDogApp(ctk.CTk):
             self.append_other(name, content, cid, time_str)
             self.show_notification(msg)
 
-    # ---------- 普通通知（右下角 Toast） ----------
+    # ---------- 叠层通知中心（手机通知风格） ----------
     def show_notification(self, msg):
-        notif = ctk.CTkToplevel(self)
-        notif.overrideredirect(True)
-        notif.attributes('-topmost', True)
-        notif.configure(fg_color=C_SURFACE)
+        self.push_toast(msg.get('name', '未知'), msg.get('content', ''),
+                        msg.get('time', ''), msg.get('id', ''))
 
-        card = ctk.CTkFrame(notif, fg_color=C_SURFACE, corner_radius=12,
-                            border_width=1, border_color=C_BORDER)
-        card.pack(fill="both", expand=True)
+    def push_toast(self, title, content, time_str, cid=""):
+        """新增一条通知：出现在最底部，其余通知向上推（叠层效果）"""
+        toast = _Toast(self, title, content, time_str, cid)
+        toast.on_close = lambda t=toast: self._remove_toast(t)
+        self._toasts.insert(0, toast)  # 索引 0 = 最底部 = 最新
+        while len(self._toasts) > TOAST_MAX:
+            old = self._toasts.pop()
+            old.on_close = None
+            old.play_disappear()
 
-        ctk.CTkLabel(card, text=f"💬 来自: {msg['name']}", font=(FONT, 11, "bold"),
-                     text_color=C_ACCENT, anchor="w").pack(fill="x", padx=14, pady=(10, 0))
-        ctk.CTkLabel(card, text=msg['content'], font=(FONT, 12), text_color=C_TEXT,
-                     anchor="w", justify="left", wraplength=272).pack(fill="x", padx=14)
-        ctk.CTkLabel(card, text=msg['time'], font=(FONT, 9), text_color=C_DIM,
-                     anchor="e").pack(fill="x", padx=14, pady=(0, 8))
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        toast.cur_x = sw - TOAST_MR - toast.w
+        toast.cur_y = sh + 8                       # 初始在屏幕外底部（滑入起点）
+        toast.target_x = toast.cur_x
+        toast.target_y = toast.cur_y
+        try:
+            toast.win.deiconify()
+        except Exception:
+            pass
+        toast._apply_geo()
+        toast.fade_in()
+        self._relayout_toasts()                     # 计算目标位置，动画滑入
+        toast.win.after(TOAST_LIFE, lambda t=toast: self._expire_toast(t))
 
-        w, h = 320, 96
-        sw, sh = notif.winfo_screenwidth(), notif.winfo_screenheight()
-        notif.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 72}")
+    def _relayout_toasts(self):
+        """从下往上重新排布所有通知（底部最新，向上堆叠）"""
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+        except Exception:
+            return
+        base = sh - TOAST_MB
+        for i, t in enumerate(self._toasts):
+            t.set_target(sw - TOAST_MR - t.w, base - (i + 1) * (t.h + TOAST_GAP))
 
-        notif.bind('<Button-1>', lambda e: notif.destroy())
+    def _expire_toast(self, toast):
+        """通知到时自动消失：其余通知下移，本条向上飞出并缩小变淡"""
+        if toast not in self._toasts:
+            return
+        self._toasts.remove(toast)
+        self._relayout_toasts()
+        toast.play_disappear()
 
-        notif.attributes('-alpha', 0)
-        for i in range(1, 11):
-            notif.after(i * 25, lambda a=i / 10: notif.attributes('-alpha', a))
-        notif.after(5000, lambda: self.fade_out(notif))
-
-    def fade_out(self, win):
-        def step(i=10):
-            if not win.winfo_exists():
-                return
-            if i <= 0:
-                win.destroy()
-                return
-            win.attributes('-alpha', i / 10)
-            win.after(25, lambda: step(i - 1))
-        step()
+    def _remove_toast(self, toast):
+        """手动点击关闭通知"""
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+            self._relayout_toasts()
 
     # ---------- 紧急警告弹窗 ----------
     def show_alert(self, msg):
         win = ctk.CTkToplevel(self)
         win.title("ChatDog · 紧急警告")
-        win.configure(fg_color="#0d0e11")
+        win.configure(fg_color="#ffffff")
         win.attributes('-topmost', True)
         w, h = 520, 360
         win.update_idletasks()
@@ -665,7 +1495,7 @@ class ChatDogApp(ctk.CTk):
                                border_width=3, border_color=C_RED)
         border.pack(fill="both", expand=True, padx=10, pady=10)
 
-        inner = ctk.CTkFrame(border, fg_color="#0d0e11", corner_radius=12)
+        inner = ctk.CTkFrame(border, fg_color="#ffffff", corner_radius=12)
         inner.pack(fill="both", expand=True, padx=6, pady=6)
 
         ctk.CTkLabel(inner, text="⚠  紧  急  警  告  ⚠",
@@ -673,7 +1503,7 @@ class ChatDogApp(ctk.CTk):
         ctk.CTkLabel(inner, text=f"来自: {msg['name']}",
                      font=(FONT, 14), text_color=C_TEXT).pack(pady=4)
         ctk.CTkLabel(inner, text=msg['content'],
-                     font=(FONT, 18, "bold"), text_color="#ffd166",
+                     font=(FONT, 18, "bold"), text_color="#b45309",
                      wraplength=400, justify="center").pack(pady=14, padx=20)
         ctk.CTkLabel(inner, text=f"时间: {msg['time']}",
                      font=(FONT, 10), text_color=C_DIM).pack(pady=4)
@@ -686,7 +1516,7 @@ class ChatDogApp(ctk.CTk):
         def flash(state=[0]):
             if not win.winfo_exists():
                 return
-            border.configure(border_color=C_RED if state[0] % 2 == 0 else "#4a0f0f")
+            border.configure(border_color=C_RED if state[0] % 2 == 0 else "#f3c6c6")
             state[0] += 1
             win.after(400, flash)
 
@@ -694,15 +1524,44 @@ class ChatDogApp(ctk.CTk):
 
     # ---------- 关闭 ----------
     def on_close(self):
-        self.send_message("已下线", "system")
-        self.running = False
         try:
-            self.sock.close()
+            if self.mode == "lan":
+                self.send_message("已下线", "system")
+            elif self.mode == "client":
+                with self.tcp_lock:
+                    s = self.tcp_sock
+                if s:
+                    self.send_message("已下线", "system")
+            elif self.mode == "server":
+                bye = {"id": self.client_id, "msg_uid": str(uuid.uuid4()),
+                       "name": "服务器", "type": "system", "content": "已关闭",
+                       "time": datetime.now().strftime("%H:%M:%S")}
+                self.server_broadcast((json.dumps(bye) + "\n").encode('utf-8'))
         except Exception:
             pass
+        self.running = False
+        for attr in ("sock", "srv_sock"):
+            s = getattr(self, attr, None)
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        with self.tcp_lock:
+            s = self.tcp_sock
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
         self.destroy()
 
 
 if __name__ == "__main__":
-    app = ChatDogApp()
-    app.mainloop()
+    launch = LaunchWindow()
+    launch.mainloop()
+    cfg = launch.result
+    if cfg:
+        app = ChatDogApp(mode=cfg["mode"], host=cfg.get("host", ""),
+                         port=cfg.get("port", DEFAULT_TCP_PORT))
+        app.mainloop()

@@ -2,7 +2,7 @@
 ; 用法：先用 PyInstaller 打包出 dist\chatdog.exe，再编译本脚本生成 dist\ChatDog_Setup.exe
 
 #define MyAppName "ChatDog"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "ChatDog"
 #define MyAppExeName "chatdog.exe"
 #define MyAppDescription "局域网聊天工具"
