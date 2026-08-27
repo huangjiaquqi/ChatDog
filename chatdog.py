@@ -415,9 +415,6 @@ class LaunchWindow(ctk.CTk):
         # ===== 标题区 =====
         head = ctk.CTkFrame(self.scroll, fg_color="transparent")
         head.pack(fill="x", padx=24, pady=(20, 4))
-        ctk.CTkLabel(head, text="C", width=52, height=52, corner_radius=26,
-                     fg_color=C_ACCENT, text_color="#ffffff",
-                     font=(FONT, 22, "bold")).pack(side="left", padx=(0, 12))
         hb = ctk.CTkFrame(head, fg_color="transparent")
         hb.pack(side="left", fill="y")
         ctk.CTkLabel(hb, text="ChatDog", font=(FONT, 22, "bold"),
@@ -795,11 +792,8 @@ class ChatDogApp(ctk.CTk):
                             border_width=1, border_color=C_BORDER)
         head.pack(fill="x", padx=16, pady=(16, 10))
 
-        ctk.CTkLabel(head, text="C", width=44, height=44, corner_radius=22,
-                     fg_color=C_ACCENT, text_color="#ffffff",
-                     font=(FONT, 19, "bold")).pack(side="left", padx=(16, 10))
         tbox = ctk.CTkFrame(head, fg_color="transparent")
-        tbox.pack(side="left", fill="y", pady=12)
+        tbox.pack(side="left", fill="y", pady=12, padx=(18, 0))
         ctk.CTkLabel(tbox, text="ChatDog", font=(FONT, 20, "bold"),
                      text_color=C_TEXT, anchor="w").pack(anchor="w")
         # 昵称输入（集成在主窗口，Enter/失焦保存并广播改名）
