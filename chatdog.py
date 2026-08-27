@@ -983,7 +983,7 @@ class ChatDogApp(ctk.CTk):
         t("o_bub", font=self._font(12), background=C_SURFACE2, foreground=C_TEXT,
           lmargin1=18, lmargin2=18, rmargin=40, spacing1=5, spacing3=5)
         t("s_time", font=self._font(9), foreground=C_DIM, justify="right", rmargin=16)
-        t("s_bub", font=self._font(12), background=C_SELF_BG, foreground=C_SELF_TX,
+        t("s_bub", font=self._font(12), foreground=C_SELF_TX,
           justify="right", lmargin1=170, lmargin2=170, rmargin=16, spacing1=5, spacing3=5)
         t("alert", font=self._font(12, "bold"), background=C_RED_BG, foreground="#c0272d",
           justify="center", spacing1=8, spacing3=8, lmargin1=18, lmargin2=18, rmargin=18)
