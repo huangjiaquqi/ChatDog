@@ -237,7 +237,13 @@ class _Toast:
 
     def __init__(self, master, title, content, time_str, cid=""):
         self.master = master
-        self.w, self.h = self.W, self.H
+        # 尺寸按 CTk 窗口 DPI 缩放倍率放大（100%=1.0, 125%=1.25, 150%=1.5）
+        try:
+            self._scale = ctk.ScalingTracker.get_window_scaling(master)
+        except Exception:
+            self._scale = 1.0
+        self.w = max(int(self.W * self._scale), 120)
+        self.h = max(int(self.H * self._scale), 56)
         self.cur_x = self.cur_y = 0
         self.target_x = self.target_y = 0
         self._layout_anim_on = False
@@ -270,7 +276,8 @@ class _Toast:
         ctk.CTkLabel(head, text=time_str, font=(FONT, 9), text_color=C_DIM
                      ).pack(side="right")
         ctk.CTkLabel(card, text=content, font=(FONT, 11), text_color=C_DIM,
-                     anchor="w", justify="left", wraplength=self.W - 72
+                     anchor="w", justify="left",
+                     wraplength=int((self.W - 72) * self._scale)
                      ).pack(fill="x", padx=(54, 14), pady=(4, 10))
 
         # 点击任意位置关闭
@@ -306,7 +313,10 @@ class _Toast:
 
     def _apply_geo(self):
         try:
-            self.win.geometry(f"{int(self.w)}x{int(self.h)}+{int(self.cur_x)}+{int(self.cur_y)}")
+            # 注意：CTk 会把 geometry 的尺寸按 DPI 放大，位置不放大
+            # 因此尺寸用逻辑值（W/H），位置用物理像素（cur_x/cur_y）
+            self.win.geometry(
+                f"{self.W}x{self.H}+{int(self.cur_x)}+{int(self.cur_y)}")
         except Exception:
             pass
 
@@ -339,7 +349,8 @@ class _Toast:
     def play_disappear(self):
         """消失动画：从下到上移动 + 快速变小变淡"""
         ox, oy = self.cur_x, self.cur_y
-        ow, oh = self.w, self.h
+        ow, oh = self.w, self.h   # 物理尺寸
+        lift = 52 * self._scale   # 上移距离（按 DPI 缩放保持视觉一致）
         steps = 12
 
         def step(i):
@@ -356,12 +367,15 @@ class _Toast:
                     pass
                 return
             k = i / steps
-            nw = int(ow * (1 - 0.42 * k))          # 快速变小
-            nh = int(oh * (1 - 0.42 * k))
-            nx = int(ox + (ow - nw) / 2)           # 居中收缩
-            ny = int(oy - 52 * k)                  # 从下到上移动
+            pw = int(ow * (1 - 0.42 * k))          # 物理尺寸快速变小
+            ph = int(oh * (1 - 0.42 * k))
+            # geometry 尺寸参数会被 CTk 按 DPI 放大，需换算回逻辑值
+            gw = max(int(pw / self._scale), 40)
+            gh = max(int(ph / self._scale), 20)
+            nx = int(ox + (ow - pw) / 2)           # 居中收缩
+            ny = int(oy - lift * k)                # 从下到上移动
             try:
-                self.win.geometry(f"{nw}x{nh}+{nx}+{ny}")
+                self.win.geometry(f"{gw}x{gh}+{nx}+{ny}")
                 self.win.attributes('-alpha', 1.0 - k)  # 变淡
             except Exception:
                 pass
@@ -1435,15 +1449,18 @@ class ChatDogApp(ctk.CTk):
             old.on_close = None
             old.play_disappear()
 
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        toast.cur_x = sw - TOAST_MR - toast.w
-        toast.cur_y = sh + 8                       # 初始在屏幕外底部（滑入起点）
-        toast.target_x = toast.cur_x
-        toast.target_y = toast.cur_y
+        # 先显示窗口，再读取它所在屏幕的真实尺寸（多显示器/DPI 下才准确）
         try:
             toast.win.deiconify()
+            toast.win.update_idletasks()
+            sw = toast.win.winfo_screenwidth()
+            sh = toast.win.winfo_screenheight()
         except Exception:
-            pass
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        toast.cur_x = sw - TOAST_MR - toast.w
+        toast.cur_y = sh + toast.h                # 初始完全在屏幕外底部（滑入起点）
+        toast.target_x = toast.cur_x
+        toast.target_y = toast.cur_y
         toast._apply_geo()
         toast.fade_in()
         self._relayout_toasts()                     # 计算目标位置，动画滑入
@@ -1451,9 +1468,12 @@ class ChatDogApp(ctk.CTk):
 
     def _relayout_toasts(self):
         """从下往上重新排布所有通知（底部最新，向上堆叠）"""
+        if not self._toasts:
+            return
+        # 用 toast 自己所在屏幕的尺寸，避免多显示器下错位
         try:
-            sw = self.winfo_screenwidth()
-            sh = self.winfo_screenheight()
+            sw = self._toasts[0].win.winfo_screenwidth()
+            sh = self._toasts[0].win.winfo_screenheight()
         except Exception:
             return
         base = sh - TOAST_MB
