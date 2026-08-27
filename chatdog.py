@@ -47,12 +47,45 @@ NAME_COLORS = ["#3b6fd4", "#4e9a51", "#8a5cd6", "#d64562",
                "#0e8fa3", "#d97a2b", "#2e9e8f", "#b3862d"]
 
 # ---------- 叠层通知参数 ----------
-TRANS_KEY  = "#010203"   # Toast 窗口透明色键（实现真圆角）
-TOAST_MR   = 24          # 通知距屏幕右侧
-TOAST_MB   = 76          # 通知距屏幕底部（任务栏上方）
+TOAST_MR   = 24          # 通知距工作区右侧
+TOAST_MB   = 16          # 通知距工作区底部（工作区已排除任务栏）
 TOAST_GAP  = 10          # 通知间距
 TOAST_LIFE = 4500        # 通知停留时长（毫秒）
 TOAST_MAX  = 5           # 最大叠层数
+
+
+def get_workarea():
+    """Windows 工作区物理像素（右/下边界，已排除任务栏）。
+    与 Tk 同处一个 DPI 坐标系，定位自洽，不受缩放倍率影响。"""
+    class _RECT(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
+    rc = _RECT()
+    try:
+        ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rc), 0)
+        return rc.r, rc.b
+    except Exception:
+        return None, None
+
+
+def apply_win11_round_corners(win):
+    """Win11+ 让系统给窗口绘制原生圆角（无色键、无暗角）；
+    Win10 自动降级为直角，同样干净和谐。"""
+    try:
+        DWMWA_CORNER = 33      # DWMWA_WINDOW_CORNER_PREFERENCE
+        DWMWCP_ROUND = 2
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            hwnd = win.winfo_id()
+        if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(hwnd), DWMWA_CORNER,
+                ctypes.byref(ctypes.c_int(DWMWCP_ROUND)), 4) != 0:
+            # 失败则尝试直接对自身 hwnd 设置
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(win.winfo_id()), DWMWA_CORNER,
+                ctypes.byref(ctypes.c_int(DWMWCP_ROUND)), 4)
+    except Exception:
+        pass
 
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ChatDog.App.1.1")
 
@@ -231,17 +264,24 @@ def ask_input(master, title, message, initial="", ok_text="确定"):
 
 # ---------- 叠层通知 Toast ----------
 class _Toast:
-    """手机通知风格的单条 Toast（叠层与位置由 ChatDogApp 管理）"""
-    W = 340
-    H = 96
+    """手机通知风格的单条 Toast（叠层与位置由 ChatDogApp 管理）。
+
+    实现要点（修复四角暗色 + 位置偏移）：
+    - 纯色窗口 + Win11 系统 DWM 圆角，不用透明色键，杜绝抗锯齿暗角
+    - 尺寸先按 DPI 预估，显示后实测真实值再定位，坐标自洽不依赖缩放 API
+    - 位置基于 Windows 工作区 API（已排除任务栏），与 Tk 同坐标系
+    """
+    W = 340   # 逻辑宽（CTk 渲染时按 DPI 放大）
+    H = 96    # 逻辑高
 
     def __init__(self, master, title, content, time_str, cid=""):
         self.master = master
-        # 尺寸按 CTk 窗口 DPI 缩放倍率放大（100%=1.0, 125%=1.25, 150%=1.5）
+        # 预估 DPI 倍率（仅用于初始 geometry 与文本换行宽度）
         try:
             self._scale = ctk.ScalingTracker.get_window_scaling(master)
         except Exception:
             self._scale = 1.0
+        self._rscale = self._scale          # 实测后的真实渲染倍率
         self.w = max(int(self.W * self._scale), 120)
         self.h = max(int(self.H * self._scale), 56)
         self.cur_x = self.cur_y = 0
@@ -254,13 +294,11 @@ class _Toast:
         self.win.withdraw()
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
-        try:
-            self.win.attributes('-transparentcolor', TRANS_KEY)
-            self.win.configure(fg_color=TRANS_KEY)
-        except Exception:
-            self.win.configure(fg_color=C_SURFACE)
+        # 纯色窗口：与卡片同色，四角干净无暗色（圆角由系统 DWM 绘制）
+        self.win.configure(fg_color=C_SURFACE)
+        apply_win11_round_corners(self.win)
 
-        card = ctk.CTkFrame(self.win, fg_color=C_SURFACE, corner_radius=14,
+        card = ctk.CTkFrame(self.win, fg_color=C_SURFACE, corner_radius=0,
                             border_width=1, border_color=C_BORDER)
         card.pack(fill="both", expand=True)
 
@@ -269,7 +307,7 @@ class _Toast:
         head.pack(fill="x", padx=14, pady=(11, 0))
         avatar_txt = str(title)[:1].upper() if title else "·"
         ctk.CTkLabel(head, text=avatar_txt, width=30, height=30, corner_radius=15,
-                     fg_color=color, text_color="#141519",
+                     fg_color=color, text_color="#ffffff",
                      font=(FONT, 13, "bold")).pack(side="left")
         ctk.CTkLabel(head, text=title, font=(FONT, 12, "bold"), text_color=C_TEXT,
                      anchor="w").pack(side="left", padx=(10, 8), fill="x", expand=True)
@@ -282,6 +320,17 @@ class _Toast:
 
         # 点击任意位置关闭
         self._bind_close(card)
+
+    def measure(self):
+        """显示后实测真实渲染尺寸，并推算实际 DPI 倍率（自洽闭环）"""
+        try:
+            self.win.update_idletasks()
+            self.w = max(self.win.winfo_width(), 120)
+            self.h = max(self.win.winfo_height(), 56)
+            if self.W > 0:
+                self._rscale = max(self.w / self.W, 0.5)
+        except Exception:
+            pass
 
     def _bind_close(self, widget):
         widget.bind("<Button-1>", lambda e: self.close_now())
@@ -311,12 +360,15 @@ class _Toast:
         self._apply_geo()
         self.win.after(16, self._layout_step)
 
+    def _geo_size(self, pw, ph):
+        """物理像素 → geometry 逻辑值（CTk 会把尺寸按 DPI 放大）"""
+        return (max(int(round(pw / self._rscale)), 40),
+                max(int(round(ph / self._rscale)), 20))
+
     def _apply_geo(self):
         try:
-            # 注意：CTk 会把 geometry 的尺寸按 DPI 放大，位置不放大
-            # 因此尺寸用逻辑值（W/H），位置用物理像素（cur_x/cur_y）
-            self.win.geometry(
-                f"{self.W}x{self.H}+{int(self.cur_x)}+{int(self.cur_y)}")
+            gw, gh = self._geo_size(self.w, self.h)
+            self.win.geometry(f"{gw}x{gh}+{int(self.cur_x)}+{int(self.cur_y)}")
         except Exception:
             pass
 
@@ -349,8 +401,8 @@ class _Toast:
     def play_disappear(self):
         """消失动画：从下到上移动 + 快速变小变淡"""
         ox, oy = self.cur_x, self.cur_y
-        ow, oh = self.w, self.h   # 物理尺寸
-        lift = 52 * self._scale   # 上移距离（按 DPI 缩放保持视觉一致）
+        ow, oh = self.w, self.h          # 实测物理尺寸
+        lift = int(52 * self._rscale)    # 上移距离（按实测倍率缩放，视觉一致）
         steps = 12
 
         def step(i):
@@ -369,9 +421,7 @@ class _Toast:
             k = i / steps
             pw = int(ow * (1 - 0.42 * k))          # 物理尺寸快速变小
             ph = int(oh * (1 - 0.42 * k))
-            # geometry 尺寸参数会被 CTk 按 DPI 放大，需换算回逻辑值
-            gw = max(int(pw / self._scale), 40)
-            gh = max(int(ph / self._scale), 20)
+            gw, gh = self._geo_size(pw, ph)        # 换算回 geometry 逻辑值
             nx = int(ox + (ow - pw) / 2)           # 居中收缩
             ny = int(oy - lift * k)                # 从下到上移动
             try:
@@ -1440,7 +1490,11 @@ class ChatDogApp(ctk.CTk):
                         msg.get('time', ''), msg.get('id', ''))
 
     def push_toast(self, title, content, time_str, cid=""):
-        """新增一条通知：出现在最底部，其余通知向上推（叠层效果）"""
+        """新增一条通知：在屏幕内目标位淡入出现，其余通知向上推（叠层效果）。
+
+        注意：窗口必须始终在屏幕内——完全屏幕外的 Tk 窗口不会收到
+        绘制事件，canvas 缓冲为空，移回后显示空白（CTk 不因纯移动重绘）。
+        """
         toast = _Toast(self, title, content, time_str, cid)
         toast.on_close = lambda t=toast: self._remove_toast(t)
         self._toasts.insert(0, toast)  # 索引 0 = 最底部 = 最新
@@ -1449,36 +1503,43 @@ class ChatDogApp(ctk.CTk):
             old.on_close = None
             old.play_disappear()
 
-        # 先显示窗口，再读取它所在屏幕的真实尺寸（多显示器/DPI 下才准确）
+        wa_r, wa_b = get_workarea()
+        if wa_r is None:
+            wa_r = self.winfo_screenwidth()
+            wa_b = self.winfo_screenheight()
+        # 1) 按预估尺寸先算屏幕内初始位置，显示窗口（确保 canvas 被绘制）
+        toast.cur_x = wa_r - TOAST_MR - toast.w
+        toast.cur_y = wa_b - TOAST_MB - toast.h
+        toast.target_x, toast.target_y = toast.cur_x, toast.cur_y
         try:
+            toast._apply_geo()          # 屏幕内 geometry（withdraw 状态下设置）
             toast.win.deiconify()
-            toast.win.update_idletasks()
-            sw = toast.win.winfo_screenwidth()
-            sh = toast.win.winfo_screenheight()
+            toast.measure()             # 实测真实渲染尺寸
         except Exception:
-            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        toast.cur_x = sw - TOAST_MR - toast.w
-        toast.cur_y = sh + toast.h                # 初始完全在屏幕外底部（滑入起点）
-        toast.target_x = toast.cur_x
-        toast.target_y = toast.cur_y
-        toast._apply_geo()
+            pass
+        # 2) 用实测尺寸校正位置（差异仅几个像素，随叠层动画平滑归位）
+        toast.cur_x = wa_r - TOAST_MR - toast.w
+        toast.cur_y = wa_b - TOAST_MB - toast.h
+        toast.target_x, toast.target_y = toast.cur_x, toast.cur_y
         toast.fade_in()
-        self._relayout_toasts()                     # 计算目标位置，动画滑入
+        self._relayout_toasts()          # 旧通知向上推，新通知归位
         toast.win.after(TOAST_LIFE, lambda t=toast: self._expire_toast(t))
 
     def _relayout_toasts(self):
         """从下往上重新排布所有通知（底部最新，向上堆叠）"""
         if not self._toasts:
             return
-        # 用 toast 自己所在屏幕的尺寸，避免多显示器下错位
-        try:
-            sw = self._toasts[0].win.winfo_screenwidth()
-            sh = self._toasts[0].win.winfo_screenheight()
-        except Exception:
-            return
-        base = sh - TOAST_MB
+        wa_r, wa_b = get_workarea()
+        if wa_r is None:
+            try:
+                wa_r = self.winfo_screenwidth()
+                wa_b = self.winfo_screenheight()
+            except Exception:
+                return
+        base = wa_b - TOAST_MB               # 最底通知底边的目标线
         for i, t in enumerate(self._toasts):
-            t.set_target(sw - TOAST_MR - t.w, base - (i + 1) * (t.h + TOAST_GAP))
+            y = base - (i + 1) * t.h - i * TOAST_GAP
+            t.set_target(wa_r - TOAST_MR - t.w, y)
 
     def _expire_toast(self, toast):
         """通知到时自动消失：其余通知下移，本条向上飞出并缩小变淡"""
