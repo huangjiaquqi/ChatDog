@@ -1,5 +1,7 @@
 # ChatDog
 
+[官方网站](http://chatdog.xo.je)
+
 > 一个极简的 **Windows 局域网聊天工具** —— 无需服务器、无需联网、无需安装，支持完全无网直连，同一 WiFi / 热点 / 网线下的同学即开即聊。
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
