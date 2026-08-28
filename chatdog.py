@@ -1011,26 +1011,47 @@ class ChatDogApp(ctk.CTk):
             pass
         return tag
 
-    def _bubble_tag(self, cid, mine=False):
-        """为某用户创建/获取气泡 tag：随机亮色背景 + 黑色文字。
-        背景 tag 只覆盖文字本身，天然实现"气泡长度=消息长度"。
-        mine=True 时右对齐。"""
-        tag = f"bub_{cid}"
-        # 第一次见到该用户时随机分配亮色（会话内稳定，重进重新随机）
-        if cid not in self.bubble_colors:
-            self.bubble_colors[cid] = random.choice(BUBBLE_COLORS)
+    def _insert_bubble(self, content, mine=False, cid=None):
+        """插入圆角聊天气泡（嵌入式框架，自己与他人逻辑完全一致）。
+
+        彻底弃用 Text tag 背景方案（背景是否贴合文字受 justify/lmargin/
+        rmargin 组合影响，会出现铺满整行的不可控行为），改为：
+        - 气泡 = 嵌入 Text 的圆角 CTkFrame，宽度随内容收缩，物理上
+          保证"气泡长度 = 消息长度"，长消息自动换行；
+        - 颜色 = 用户进入时随机分配的亮色，文字统一黑色；
+        - 行对齐用无背景的 justify tag：自己靠右、他人靠左。
+        """
+        tb = self.msg_text._textbox
+        key = self.client_id if mine else (cid or "anon")
+        if key not in self.bubble_colors:
+            self.bubble_colors[key] = random.choice(BUBBLE_COLORS)
+
+        # 长消息换行宽度（预留两侧边距与气泡内边距）
         try:
-            self.msg_text._textbox.tag_config(
-                tag, font=self._font(12), background=self.bubble_colors[cid],
-                foreground="#1a1a1a",
-                justify="right" if mine else "left",
-                lmargin1=170 if mine else 18,
-                lmargin2=170 if mine else 18,
-                rmargin=16 if mine else 40,
-                spacing1=6, spacing3=6, spacing2=3)
+            maxw = max(220, tb.winfo_width() - 160)
         except Exception:
-            pass
-        return tag
+            maxw = 400
+
+        frm = ctk.CTkFrame(tb, fg_color=self.bubble_colors[key], corner_radius=14)
+        ctk.CTkLabel(frm, text=content, font=self._font(12),
+                    text_color="#1a1a1a", justify="left",
+                    wraplength=maxw).pack(padx=12, pady=7)
+        frm.update_idletasks()
+
+        tag = f"ln_{uuid.uuid4().hex[:8]}"
+        tb.configure(state="normal")
+        # 注意：Tk 的 "end" 插入实际发生在末尾换行符之前，
+        # 因此先补一个换行起新行，窗口恰好落在该行，tag 才能正确覆盖
+        tb.insert("end", "\n")
+        start = tb.index("end-1c")
+        tb.window_create(start, window=frm)
+        tb.tag_add(tag, start, start + "+1c")
+        tb.insert("end", "\n")
+        tb.configure(state="disabled")
+        # 行对齐：无背景 tag，只控制整行左右对齐（规避背景铺满问题）
+        tb.tag_config(tag, justify="right" if mine else "left",
+                      lmargin1=18, lmargin2=18, rmargin=18)
+        tb.see("end")
 
     def _insert(self, text, tags=None):
         self.msg_text.configure(state="normal")
@@ -1047,22 +1068,20 @@ class ChatDogApp(ctk.CTk):
             self._first_block = False
 
     def append_self(self, content):
-        """自己的消息：右对齐随机亮色气泡"""
+        """自己的消息：右对齐随机亮色圆角气泡"""
         ts = datetime.now().strftime("%H:%M:%S")
         self._sep()
         self._insert(f"{ts}  我", ("s_time",))
         self._insert("\n")
-        self._insert(f"  {content}  ", (self._bubble_tag(self.client_id, mine=True),))
-        self._insert("\n")
+        self._insert_bubble(content, mine=True)
 
     def append_other(self, name, content, cid, ts):
-        """别人的消息：左对齐随机亮色气泡，昵称带专属颜色"""
+        """别人的消息：左对齐随机亮色圆角气泡，昵称带专属颜色"""
         self._sep()
         self._insert(f" {name} ", (self._name_tag(cid),))
         self._insert(f" {ts}", ("o_time",))
         self._insert("\n")
-        self._insert(f"  {content}  ", (self._bubble_tag(cid),))
-        self._insert("\n")
+        self._insert_bubble(content, mine=False, cid=cid)
 
     def append_system(self, text):
         self._sep()
