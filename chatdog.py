@@ -5,7 +5,7 @@
   lan     默认模式，同一 WiFi/热点下 UDP 广播+单播自动发现
   server  服务器模式，TCP 监听端口，其他人直连你的 IP:端口
   client  客户端模式，TCP 直连对方的 IP:端口
-支持完全无网环境（网线直连等），历史配置记忆在程序目录 chatdog_profiles.json
+支持完全无网环境（网线直连等），上次昵称记忆在程序目录 chatdog_profiles.json
 """
 import socket
 import threading
@@ -118,16 +118,15 @@ PROFILE_FILE = os.path.join(app_dir(), "chatdog_profiles.json")
 
 
 def load_profiles():
-    """读取历史连接配置与上次昵称"""
+    """读取上次使用的昵称"""
     try:
         with open(PROFILE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get('entries'), list):
-            data.setdefault("last_nickname", "")
-            return data
+        if isinstance(data, dict):
+            return {"last_nickname": str(data.get("last_nickname", ""))}
     except Exception:
         pass
-    return {"last_nickname": "", "entries": []}
+    return {"last_nickname": ""}
 
 
 def save_profiles(data):
@@ -470,10 +469,10 @@ class LaunchWindow(ctk.CTk):
         self.title("ChatDog · 启动")
         self.configure(fg_color=C_BG)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = min(620, sw - 80), min(720, sh - 140)
+        w, h = min(620, sw - 80), min(560, sh - 140)
         self.update_idletasks()
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(8, (sh - h) // 2)}")
-        self.minsize(560, 560)
+        self.minsize(560, 480)
         self.result = None
 
         try:
@@ -483,7 +482,6 @@ class LaunchWindow(ctk.CTk):
         except Exception:
             pass
 
-        self.profiles = load_profiles()
         self._mode = ctk.StringVar(value="lan")
         self._port = ctk.StringVar(value=str(DEFAULT_TCP_PORT))
         self._host = ctk.StringVar(value="")
@@ -508,21 +506,6 @@ class LaunchWindow(ctk.CTk):
                      text_color=C_TEXT, anchor="w").pack(anchor="w")
         ctk.CTkLabel(hb, text="选择启动模式 · 支持完全无网环境",
                      font=(FONT, 11), text_color=C_DIM, anchor="w").pack(anchor="w")
-
-        # ===== 历史配置 =====
-        hrow = ctk.CTkFrame(self.scroll, fg_color="transparent")
-        hrow.pack(fill="x", padx=26, pady=(12, 4))
-        ctk.CTkLabel(hrow, text="历史配置", font=(FONT, 13, "bold"),
-                     text_color=C_TEXT).pack(side="left")
-        ctk.CTkLabel(hrow, text="（🚀 一键启动 · 📌 顶置 · ✏ 重命名 · 🗑 删除）",
-                     font=(FONT, 10), text_color=C_DIM).pack(side="left", padx=(8, 0))
-
-        self.hist_frame = ctk.CTkScrollableFrame(
-            self.scroll, fg_color=C_SURFACE, corner_radius=14,
-            border_width=1, border_color=C_BORDER, height=170)
-        self.hist_frame.pack(fill="x", padx=24, pady=(0, 4))
-        self.hist_frame.pack_propagate(False)
-        self.refresh_history()
 
         # ===== 模式选择 =====
         ctk.CTkLabel(self.scroll, text="启动模式", font=(FONT, 13, "bold"),
@@ -623,94 +606,6 @@ class LaunchWindow(ctk.CTk):
         btn.configure(text=f"  {ip}  ✓ 已复制  ")
         self.after(1200, lambda: btn.configure(text=f"  {ip}  📋  "))
 
-    # ---------- 历史配置 ----------
-    def refresh_history(self):
-        for w in self.hist_frame.winfo_children():
-            w.destroy()
-        entries = sorted(self.profiles.get("entries", []),
-                         key=lambda e: (not e.get("pinned"), -e.get("last_used", 0)))
-        if not entries:
-            ctk.CTkLabel(self.hist_frame, text="暂无历史配置\n选择下方模式启动后会自动保存到此处",
-                         font=(FONT, 11), text_color=C_DIM, justify="center"
-                         ).pack(expand=True, pady=30)
-            return
-        for e in entries:
-            self._add_history_card(e)
-
-    def _add_history_card(self, e):
-        mode = e.get("mode", "lan")
-        card = ctk.CTkFrame(self.hist_frame, fg_color=C_SURFACE2, corner_radius=12,
-                            border_width=1, border_color=C_BORDER)
-        card.pack(fill="x", pady=5, padx=2)
-
-        main = ctk.CTkFrame(card, fg_color="transparent")
-        main.pack(side="left", fill="both", expand=True, pady=8, padx=(14, 0))
-        pin = "📌 " if e.get("pinned") else ""
-        desc = {
-            "lan": "默认模式 · 局域网自动发现",
-            "server": f"服务器模式 · 监听端口 {e.get('port')}",
-            "client": f"客户端模式 · {e.get('host', '?')}:{e.get('port')}",
-        }.get(mode, mode)
-        ctk.CTkLabel(main, text=pin + e.get("name", "未命名"), font=(FONT, 13, "bold"),
-                     text_color=C_TEXT, anchor="w").pack(anchor="w")
-        ctk.CTkLabel(main, text=desc, font=(FONT, 10), text_color=C_DIM,
-                     anchor="w").pack(anchor="w")
-
-        btns = ctk.CTkFrame(card, fg_color="transparent")
-        btns.pack(side="right", padx=(0, 10))
-        small = dict(height=30, corner_radius=8, fg_color=C_SURFACE, hover_color=C_BORDER,
-                     text_color=C_DIM, font=(FONT, 12), border_width=1, border_color=C_BORDER)
-        ctk.CTkButton(btns, text="🚀 启动", width=78, text_color="#1c1408",
-                      fg_color=C_ACCENT, hover_color=C_ACCENT_D, corner_radius=8,
-                      height=30, font=(FONT, 11, "bold"),
-                      command=lambda: self._use_entry(e)).pack(side="left", padx=(6, 0))
-        pin_txt = "📍" if e.get("pinned") else "📌"
-        ctk.CTkButton(btns, text=pin_txt, width=38,
-                      command=lambda: self._pin_entry(e), **small).pack(side="left")
-        ctk.CTkButton(btns, text="✏", width=38,
-                      command=lambda: self._rename_entry(e), **small).pack(side="left")
-        del_btn = dict(small)
-        del_btn["text_color"] = C_RED
-        ctk.CTkButton(btns, text="🗑", width=38,
-                      command=lambda: self._delete_entry(e), **del_btn).pack(side="left")
-
-    def _find_entry(self, e):
-        for x in self.profiles.get("entries", []):
-            if x is e or x.get("id") == e.get("id"):
-                return x
-        return None
-
-    def _use_entry(self, e):
-        try:
-            port = int(e.get("port", DEFAULT_TCP_PORT))
-        except Exception:
-            port = DEFAULT_TCP_PORT
-        self.result = {"mode": e.get("mode", "lan"), "host": e.get("host", ""), "port": port}
-        e["last_used"] = time.time()
-        save_profiles(self.profiles)
-        self.destroy()
-
-    def _pin_entry(self, e):
-        e["pinned"] = not e.get("pinned", False)
-        save_profiles(self.profiles)
-        self.refresh_history()
-
-    def _rename_entry(self, e):
-        name = ask_input(self, "重命名配置", "为这条配置起个好记的名字：",
-                         initial=e.get("name", ""))
-        if name and name.strip():
-            e["name"] = name.strip()
-            save_profiles(self.profiles)
-            self.refresh_history()
-
-    def _delete_entry(self, e):
-        if ask_confirm(self, "删除配置", f"确定删除「{e.get('name', '')}」吗？",
-                       ok_text="删除", danger=True):
-            entries = self.profiles.get("entries", [])
-            self.profiles["entries"] = [x for x in entries if x is not e and x.get("id") != e.get("id")]
-            save_profiles(self.profiles)
-            self.refresh_history()
-
     # ---------- 启动 ----------
     def _launch(self):
         if self.result is not None:
@@ -731,36 +626,12 @@ class LaunchWindow(ctk.CTk):
                 self._warn("缺少 IP", "请输入要连接的服务器 IP 地址")
                 return
             cfg["host"] = host
-        self._save_profile(cfg)
         self.result = cfg
         self.destroy()
 
     def _warn(self, title, msg):
         dlg = _Dialog(self, title, msg, ok_text="知道了", cancel_text="关闭")
         self.wait_window(dlg)
-
-    def _save_profile(self, cfg):
-        entries = self.profiles.setdefault("entries", [])
-        key = (cfg["mode"], cfg.get("host", ""), cfg.get("port"))
-        for e in entries:
-            if (e.get("mode"), e.get("host", ""), e.get("port")) == key:
-                e["last_used"] = time.time()
-                break
-        else:
-            name = {
-                "lan": "默认模式 · 局域网",
-                "server": f"我的服务器 :{cfg['port']}",
-                "client": f"直连 {cfg['host']}:{cfg['port']}",
-            }[cfg["mode"]]
-            entries.append({"id": str(uuid.uuid4())[:8], "name": name,
-                            "mode": cfg["mode"], "host": cfg.get("host", ""),
-                            "port": cfg["port"], "pinned": False, "last_used": time.time()})
-        # 上限 12 条：超出时删掉最旧的未顶置条目
-        unpinned = [e for e in entries if not e.get("pinned")]
-        unpinned.sort(key=lambda e: e.get("last_used", 0))
-        while len(entries) > 12 and unpinned:
-            entries.remove(unpinned.pop(0))
-        save_profiles(self.profiles)
 
 
 # ---------- 主应用 ----------
