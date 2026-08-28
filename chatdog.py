@@ -41,21 +41,17 @@ C_RED      = "#e5484d"   # 警告红
 C_RED_D    = "#b91c1c"
 C_RED_BG   = "#fdecec"   # 警告底色（浅红）
 FONT = "Microsoft YaHei UI"
-# 其他用户昵称配色（按 client_id 哈希分配，浅色背景下保证可读）
-NAME_COLORS = ["#3b6fd4", "#4e9a51", "#8a5cd6", "#d64562",
-               "#0e8fa3", "#d97a2b", "#2e9e8f", "#b3862d"]
-# 气泡亮色调色板：每人进入时随机分配一种，配黑色文字可读
-BUBBLE_COLORS = [
-    "#fdf3c8",  # 奶油黄
-    "#ffe8d1",  # 蜜桃橙
-    "#ffd9d9",  # 樱花粉
-    "#ffe0ee",  # 淡粉紫
-    "#e8dcff",  # 薰衣草
-    "#d6e8ff",  # 天空蓝
-    "#d4f3f0",  # 薄荷青
-    "#d9f2d0",  # 嫩草绿
-    "#e5f0dc",  # 抹茶绿
-    "#f5edd9",  # 燕麦色
+# 用户主题色板：每人分配一个主题，名字与气泡同色系
+# （名字用深色版保证可读，气泡用同色系亮色版配黑色文字）
+USER_THEMES = [
+    ("#3b6fd4", "#d6e8ff"),  # 蓝   深蓝名字 / 天空蓝气泡
+    ("#4e9a51", "#d9f2d0"),  # 绿   深绿名字 / 嫩草绿气泡
+    ("#8a5cd6", "#e8dcff"),  # 紫   深紫名字 / 薰衣草气泡
+    ("#d64562", "#ffd9d9"),  # 红   深红名字 / 樱花粉气泡
+    ("#0e8fa3", "#d4f3f0"),  # 青   深青名字 / 薄荷青气泡
+    ("#d97a2b", "#ffe8d1"),  # 橙   深橙名字 / 蜜桃橙气泡
+    ("#b3862d", "#fdf3c8"),  # 黄   深黄名字 / 奶油黄气泡
+    ("#2e8e6f", "#d9f2e3"),  # 翠绿 深翠名字 / 浅翠绿气泡
 ]
 
 # ---------- 叠层通知参数 ----------
@@ -297,8 +293,10 @@ class _Toast:
     W = 340   # 逻辑宽（CTk 渲染时按 DPI 放大）
     H = 96    # 逻辑高
 
-    def __init__(self, master, title, content, time_str, cid=""):
+    def __init__(self, master, title, content, time_str, cid="", avatar_color=None):
         self.master = master
+        # 用户主题深色（头像底色，与名字/气泡同色系）
+        self._avatar_color = avatar_color
         # 预估 DPI 倍率（仅用于初始 geometry 与文本换行宽度）
         try:
             self._scale = ctk.ScalingTracker.get_window_scaling(master)
@@ -325,7 +323,9 @@ class _Toast:
                             border_width=1, border_color=C_BORDER)
         card.pack(fill="both", expand=True)
 
-        color = NAME_COLORS[sum(ord(c) for c in str(cid or title)) % len(NAME_COLORS)]
+        # 头像颜色默认按标题哈希取主题深色（app 会传入用户主题色覆盖）
+        theme = USER_THEMES[sum(ord(c) for c in str(cid or title)) % len(USER_THEMES)]
+        color = getattr(self, "_avatar_color", None) or theme[0]
         head = ctk.CTkFrame(card, fg_color="transparent")
         head.pack(fill="x", padx=14, pady=(11, 0))
         avatar_txt = str(title)[:1].upper() if title else "·"
@@ -786,8 +786,9 @@ class ChatDogApp(ctk.CTk):
         prof = load_profiles()
         self.nickname = (prof.get("last_nickname") or "").strip() or f"用户_{self.client_id}"
 
-        # 气泡颜色：每人进入时随机分配一种亮色，本会话内保持稳定
-        self.bubble_colors = {self.client_id: random.choice(BUBBLE_COLORS)}
+        # 用户主题：每人进入时随机分配一个（名字深色版 + 气泡亮色版），
+        # 名字颜色与气泡颜色同色系，本会话内保持稳定
+        self.user_themes = {self.client_id: random.choice(USER_THEMES)}
 
         # 在线用户表: client_id -> {"addr": (ip, port), "name": 昵称, "last_seen": 时间戳}
         self.peers = {}
@@ -1000,10 +1001,16 @@ class ChatDogApp(ctk.CTk):
         t("alert", font=self._font(12, "bold"), background=C_RED_BG, foreground="#c0272d",
           justify="center", spacing1=8, spacing3=8, lmargin1=18, lmargin2=18, rmargin=18)
 
+    def _get_theme(self, cid):
+        """获取（必要时随机分配）某用户的主题 (名字深色, 气泡亮色)"""
+        if cid not in self.user_themes:
+            self.user_themes[cid] = random.choice(USER_THEMES)
+        return self.user_themes[cid]
+
     def _name_tag(self, cid):
-        """为某用户创建/获取带专属颜色的昵称 tag"""
+        """为某用户创建/获取带专属颜色的昵称 tag（与气泡同主题）"""
         tag = f"n_{cid}"
-        color = NAME_COLORS[sum(ord(c) for c in str(cid)) % len(NAME_COLORS)]
+        color = self._get_theme(cid)[0]
         try:
             self.msg_text._textbox.tag_config(
                 tag, font=self._font(12, "bold"), foreground=color)
@@ -1023,8 +1030,7 @@ class ChatDogApp(ctk.CTk):
         """
         tb = self.msg_text._textbox
         key = self.client_id if mine else (cid or "anon")
-        if key not in self.bubble_colors:
-            self.bubble_colors[key] = random.choice(BUBBLE_COLORS)
+        bubble_color = self._get_theme(key)[1]
 
         # 长消息换行宽度（预留两侧边距与气泡内边距）
         try:
@@ -1032,7 +1038,7 @@ class ChatDogApp(ctk.CTk):
         except Exception:
             maxw = 400
 
-        frm = ctk.CTkFrame(tb, fg_color=self.bubble_colors[key], corner_radius=14)
+        frm = ctk.CTkFrame(tb, fg_color=bubble_color, corner_radius=14)
         ctk.CTkLabel(frm, text=content, font=self._font(12),
                     text_color="#1a1a1a", justify="left",
                     wraplength=maxw).pack(padx=12, pady=7)
@@ -1559,7 +1565,10 @@ class ChatDogApp(ctk.CTk):
         注意：窗口必须始终在屏幕内——完全屏幕外的 Tk 窗口不会收到
         绘制事件，canvas 缓冲为空，移回后显示空白（CTk 不因纯移动重绘）。
         """
-        toast = _Toast(self, title, content, time_str, cid)
+        # 头像底色 = 该用户主题深色（与名字/气泡同色系）
+        avatar_color = self._get_theme(cid)[0] if cid else None
+        toast = _Toast(self, title, content, time_str, cid,
+                       avatar_color=avatar_color)
         toast.on_close = lambda t=toast: self._remove_toast(t)
         self._toasts.insert(0, toast)  # 索引 0 = 最底部 = 最新
         while len(self._toasts) > TOAST_MAX:
